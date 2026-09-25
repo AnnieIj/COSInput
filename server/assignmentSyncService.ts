@@ -26,7 +26,7 @@ export function normalizeAssignedIssue(
   authorizedReposSet: Set<string>
 ): GitHubAssignedIssueRef | null {
   // CRITICAL: Pull requests returned through GitHub issue/search APIs MUST be filtered out
-  if (!item || item.pull_request) {
+  if (!item || item.pull_request || (item.html_url && item.html_url.includes('/pull/'))) {
     return null;
   }
 
@@ -153,14 +153,25 @@ export class AssignmentSyncService {
     let userId = '';
 
     const oauthUser = userAuthStore.getUserProfile();
-    if (oauthUser && oauthUser.login) {
+    if (username) {
+      if (oauthUser && oauthUser.login.toLowerCase() === username.toLowerCase()) {
+        userAvatarUrl = oauthUser.avatarUrl;
+        userId = oauthUser.id;
+      }
+    } else if (oauthUser && oauthUser.login) {
       username = oauthUser.login;
       userAvatarUrl = oauthUser.avatarUrl;
       userId = oauthUser.id;
     }
 
     // Fall back to GitHub App active installation user if OAuth user is not connected
-    const appStatus = await githubServerClient.getConnectionStatus();
+    let appStatus: any = { activeInstallation: null };
+    try {
+      appStatus = await githubServerClient.getConnectionStatus();
+    } catch {
+      // Continue even if connection status check fails
+    }
+
     if (!username && appStatus.activeInstallation?.accountLogin) {
       username = appStatus.activeInstallation.accountLogin;
       userAvatarUrl = appStatus.activeInstallation.accountAvatarUrl;
@@ -171,16 +182,20 @@ export class AssignmentSyncService {
       const error: SanitizedGitHubError = {
         classification: 'AUTHENTICATION_FAILURE',
         statusCode: 401,
-        message: 'No GitHub user is connected. Please connect GitHub in Settings to discover assigned issues.',
+        message: 'No GitHub user is connected. Please connect your GitHub account or specify a username to discover assigned issues.',
       };
       throw error;
     }
 
-    // 2. Obtain an authentication token for the search API call
+    // 2. Obtain an authentication token for the search API call (if available)
     let bearerToken: string | null = userAuthStore.getUserToken();
 
     if (!bearerToken && appStatus.activeInstallation) {
-      bearerToken = await getInstallationAccessToken(appStatus.activeInstallation.id);
+      try {
+        bearerToken = await getInstallationAccessToken(appStatus.activeInstallation.id);
+      } catch {
+        // Continue unauthenticated if token retrieval fails
+      }
     }
 
     // 3. Fetch list of authorized repositories to distinguish App-Authorized vs Public-Readable
@@ -210,7 +225,17 @@ export class AssignmentSyncService {
     const searchQuery = `is:issue is:open assignee:${encodeURIComponent(username)}`;
     const url = `https://api.github.com/search/issues?q=${searchQuery}&per_page=100&sort=updated&order=desc`;
 
-    const response = await fetch(url, { headers });
+    let response: Response;
+    try {
+      response = await fetch(url, { headers });
+    } catch (networkErr: any) {
+      const error: SanitizedGitHubError = {
+        classification: 'NETWORK_FAILURE',
+        statusCode: 0,
+        message: `Network error connecting to GitHub search API: ${networkErr?.message || 'Connection failed'}`,
+      };
+      throw error;
+    }
 
     if (!response.ok) {
       const errorBody = await response.text();

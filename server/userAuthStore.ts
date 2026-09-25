@@ -51,6 +51,73 @@ export class UserAuthStore {
   }
 
   /**
+   * Sets user profile directly (e.g. for user discovery).
+   */
+  setUserProfileOnly(profile: GitHubUserProfile, sessionKey: string = DEFAULT_SESSION_KEY): void {
+    const existing = userSessions.get(sessionKey);
+    userSessions.set(sessionKey, {
+      token: existing?.token || '',
+      profile,
+      createdAt: Date.now(),
+    });
+  }
+
+  /**
+   * Connects a GitHub user via public profile discovery (without PATs).
+   * Validates user existence on GitHub and retrieves public profile.
+   */
+  async connectByUsername(username: string, sessionKey: string = DEFAULT_SESSION_KEY): Promise<GitHubUserProfile> {
+    const cleanUsername = username.trim();
+    if (!cleanUsername) {
+      const error: SanitizedGitHubError = {
+        classification: 'AUTHENTICATION_FAILURE',
+        statusCode: 400,
+        message: 'GitHub username is required.',
+      };
+      throw error;
+    }
+
+    const res = await fetch(`https://api.github.com/users/${encodeURIComponent(cleanUsername)}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'COSInput-Server/0.2.1',
+      },
+    });
+
+    if (!res.ok) {
+      if (res.status === 404) {
+        const error: SanitizedGitHubError = {
+          classification: 'NOT_FOUND',
+          statusCode: 404,
+          message: `GitHub user "${cleanUsername}" was not found.`,
+        };
+        throw error;
+      }
+      const errorText = await res.text();
+      const error: SanitizedGitHubError = {
+        classification: res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 403 ? 'AUTHORIZATION_FAILURE' : 'GITHUB_SERVICE_FAILURE',
+        statusCode: res.status,
+        message: `Failed to query GitHub user profile: ${errorText}`,
+      };
+      throw error;
+    }
+
+    const userData = (await res.json()) as any;
+    const profile: GitHubUserProfile = {
+      id: String(userData.id),
+      login: userData.login,
+      name: userData.name || userData.login,
+      avatarUrl: userData.avatar_url || '',
+      authSource: 'user_discovery',
+      authenticatedAt: new Date().toISOString(),
+    };
+
+    this.setUserProfileOnly(profile, sessionKey);
+    return profile;
+  }
+
+  /**
    * Exchanges an OAuth code for a GitHub User Access Token.
    * Keeps token server-side.
    */

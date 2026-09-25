@@ -39,6 +39,15 @@ export interface GitHubUser {
   syncedAt: string;
 }
 
+export interface GitHubUserProfile {
+  id: string;
+  login: string;
+  name: string;
+  avatarUrl: string;
+  authSource: 'oauth' | 'installation_account' | 'user_discovery';
+  authenticatedAt: string;
+}
+
 export interface GitHubRepoSummary {
   id: string;
   owner: string;

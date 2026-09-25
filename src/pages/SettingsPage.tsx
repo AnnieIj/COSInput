@@ -9,14 +9,20 @@ export const SettingsPage: React.FC = () => {
     connectionState,
     statusData,
     currentUser,
+    connectedUser,
     loadingStatus,
     refreshStatus,
+    connectUserByUsername,
+    disconnectUser,
   } = useMode();
 
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [webhookEvents, setWebhookEvents] = useState<any[]>([]);
   const [repoCount, setRepoCount] = useState<number>(0);
   const [loadingRepos, setLoadingRepos] = useState<boolean>(false);
+  const [userHandleInput, setUserHandleInput] = useState<string>('');
+  const [connectingUser, setConnectingUser] = useState<boolean>(false);
+  const [userAuthError, setUserAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     // Attempt to load installation URL
@@ -49,6 +55,39 @@ export const SettingsPage: React.FC = () => {
       alert(
         'GITHUB_APP_SLUG is not configured on the server. Please define GITHUB_APP_SLUG in your environment variables.'
       );
+    }
+  };
+
+  const handleOAuthConnect = async () => {
+    setUserAuthError(null);
+    try {
+      const redirectUri = `${window.location.origin}/api/github/user/callback`;
+      const { authUrl } = await githubService.getUserAuthUrl(redirectUri);
+      const authWindow = window.open(
+        authUrl,
+        'github_oauth_popup',
+        'width=600,height=750,menubar=no,toolbar=no'
+      );
+      if (!authWindow) {
+        setUserAuthError('Popup blocked. Please allow popups to authorize with GitHub.');
+      }
+    } catch (err: any) {
+      setUserAuthError(err.message || 'Failed to start GitHub OAuth flow.');
+    }
+  };
+
+  const handleManualUserConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userHandleInput.trim()) return;
+    setConnectingUser(true);
+    setUserAuthError(null);
+    try {
+      await connectUserByUsername(userHandleInput.trim());
+      setUserHandleInput('');
+    } catch (err: any) {
+      setUserAuthError(err.message || 'Failed to connect user handle.');
+    } finally {
+      setConnectingUser(false);
     }
   };
 
@@ -156,17 +195,139 @@ export const SettingsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Real GitHub App Connection Flow */}
+      {/* 2. Contributor User Authorization (Assignment Discovery) */}
+      <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-surface-container-low">
+          <div className="flex items-center gap-2.5">
+            <span className="material-symbols-outlined text-primary text-[22px]">person_check</span>
+            <div>
+              <h2 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
+                1. Contributor User Authorization (Assignment Discovery)
+              </h2>
+              <p className="font-body-sm text-body-sm text-secondary">
+                Identifies your GitHub contributor identity to discover assigned open issues across public repositories. Zero PATs required.
+              </p>
+            </div>
+          </div>
+          <div>
+            {connectedUser ? (
+              <span className="px-2.5 py-1 rounded-full bg-tertiary-container/20 text-tertiary font-code-sm text-code-sm font-semibold flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+                Contributor Connected
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded-full bg-surface-container text-secondary font-code-sm text-code-sm font-medium flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-outline"></span>
+                User Not Connected
+              </span>
+            )}
+          </div>
+        </div>
+
+        {userAuthError && (
+          <div className="p-3 rounded-lg bg-error-container/20 border border-error/40 text-error text-body-sm flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px]">error</span>
+            <span>{userAuthError}</span>
+          </div>
+        )}
+
+        {/* Connected Contributor Profile */}
+        {connectedUser && (
+          <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              {connectedUser.avatarUrl ? (
+                <img
+                  src={connectedUser.avatarUrl}
+                  alt={connectedUser.login}
+                  className="w-12 h-12 rounded-full object-cover ring-2 ring-primary shrink-0"
+                />
+              ) : (
+                <div className="w-12 h-12 rounded-full bg-primary-container text-on-primary flex items-center justify-center font-bold text-base shrink-0">
+                  {connectedUser.login.slice(0, 2).toUpperCase()}
+                </div>
+              )}
+              <div className="flex flex-col min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    @{connectedUser.login}
+                  </h3>
+                  <span className="font-code-sm text-[11px] bg-tertiary-fixed text-on-tertiary-fixed px-2 py-0.5 rounded font-semibold uppercase">
+                    {connectedUser.authSource}
+                  </span>
+                </div>
+                <span className="font-code-sm text-code-sm text-secondary font-mono mt-0.5">
+                  ID: #{connectedUser.id} • Connected: {new Date(connectedUser.authenticatedAt).toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={disconnectUser}
+              className="px-4 py-2 rounded-lg bg-surface-container hover:bg-error-container/20 text-secondary hover:text-error font-label-md text-label-md font-semibold border border-surface-container transition-colors"
+            >
+              Disconnect Contributor
+            </button>
+          </div>
+        )}
+
+        {/* Connect Action Controls */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+            <span className="text-secondary text-[11px] font-bold uppercase tracking-wider block">
+              Method A: GitHub OAuth Connect
+            </span>
+            <p className="font-body-sm text-body-sm text-secondary">
+              Authorizes via OAuth popup using GitHub App Client credentials. Tokens remain server-side.
+            </p>
+            <button
+              type="button"
+              onClick={handleOAuthConnect}
+              className="mt-2 px-4 py-2 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm flex items-center gap-2 cursor-pointer transition-colors"
+            >
+              <span className="material-symbols-outlined text-[18px]">vpn_key</span>
+              <span>Authorize with GitHub (OAuth)</span>
+            </button>
+          </div>
+
+          <form onSubmit={handleManualUserConnect} className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+            <span className="text-secondary text-[11px] font-bold uppercase tracking-wider block">
+              Method B: Connect by Handle
+            </span>
+            <p className="font-body-sm text-body-sm text-secondary">
+              Directly verify your GitHub handle to discover public assignments without waiting for OAuth credentials.
+            </p>
+            <div className="flex items-center gap-2 pt-1">
+              <input
+                type="text"
+                value={userHandleInput}
+                onChange={(e) => setUserHandleInput(e.target.value)}
+                placeholder="e.g. AnnieIj, octocat"
+                className="flex-1 h-9 px-3 bg-surface-container-lowest rounded-lg font-code-sm text-code-sm text-on-surface border border-surface-container focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+              <button
+                type="submit"
+                disabled={connectingUser || !userHandleInput.trim()}
+                className="px-3.5 h-9 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-headline-sm text-headline-sm font-semibold border border-surface-container transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                {connectingUser ? 'Verifying...' : 'Set User'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      {/* 3. Real GitHub App Connection Flow */}
       <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-surface-container-low">
           <div className="flex items-center gap-2.5">
             <span className="material-symbols-outlined text-primary text-[22px]">link</span>
             <div>
               <h2 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
-                GitHub App Authorization & Installation
+                2. GitHub App Repository Authorization
               </h2>
               <p className="font-body-sm text-body-sm text-secondary">
-                Connect via GitHub App architecture. No Personal Access Tokens (PATs) required.
+                Controls repository-level permissions and write capabilities. Separate from contributor user authorization.
               </p>
             </div>
           </div>
@@ -303,13 +464,13 @@ export const SettingsPage: React.FC = () => {
                 <div>
                   <span className="text-secondary block">Webhook URL:</span>
                   <code className="bg-surface-container px-1 py-0.5 rounded select-all break-all">
-                    https://ais-dev-emj5m3hlxkg4zdyx5xi245-359578166784.europe-west2.run.app/api/github/webhooks
+                    {typeof window !== 'undefined' ? `${window.location.origin}/api/github/webhooks` : '/api/github/webhooks'}
                   </code>
                 </div>
                 <div>
-                  <span className="text-secondary block">Callback URL:</span>
+                  <span className="text-secondary block">OAuth / User Callback URL:</span>
                   <code className="bg-surface-container px-1 py-0.5 rounded select-all break-all">
-                    https://ais-dev-emj5m3hlxkg4zdyx5xi245-359578166784.europe-west2.run.app/api/github/callback
+                    {typeof window !== 'undefined' ? `${window.location.origin}/api/github/user/callback` : '/api/github/user/callback'}
                   </code>
                 </div>
               </div>

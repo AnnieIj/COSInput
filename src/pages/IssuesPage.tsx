@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useMode } from '../context/ModeContext';
 import { githubService } from '../services/github.service';
@@ -15,7 +15,7 @@ import type {
 export const IssuesPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { mode, isLive, currentUser } = useMode();
+  const { mode, isLive, currentUser, connectedUser, connectUserByUsername, disconnectUser, refreshStatus } = useMode();
 
   const [assignments, setAssignments] = useState<GitHubAssignedIssueRef[]>([]);
   const [groupedRepos, setGroupedRepos] = useState<RepositoryAssignmentGroup[]>([]);
@@ -23,6 +23,12 @@ export const IssuesPage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(isLive);
   const [syncing, setSyncing] = useState<boolean>(false);
   const [error, setError] = useState<SanitizedGitHubError | null>(null);
+
+  // Manual username connect inline form state
+  const [manualUsername, setManualUsername] = useState<string>('');
+  const [connectingUser, setConnectingUser] = useState<boolean>(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [showConnectModal, setShowConnectModal] = useState<boolean>(false);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<'all' | 'assigned' | 'in_progress' | 'completed' | 'blocked'>('assigned');
@@ -32,8 +38,8 @@ export const IssuesPage: React.FC = () => {
   // Start Contribution Gate Modal
   const [selectedIssueForGate, setSelectedIssueForGate] = useState<GitHubAssignedIssueRef | null>(null);
 
-  // Load assignments (initial fetch)
-  const loadAssignments = async (forceSync = false) => {
+  // Load assignments (initial fetch or manual sync)
+  const loadAssignments = useCallback(async (forceSync = false, targetUser?: string) => {
     if (!isLive) {
       setLoading(false);
       setError(null);
@@ -49,7 +55,7 @@ export const IssuesPage: React.FC = () => {
 
     try {
       const result: AssignmentSyncResult = forceSync
-        ? await githubService.syncAssignments()
+        ? await githubService.syncAssignments(targetUser)
         : await githubService.getAssignments();
 
       setAssignments(result.issues || []);
@@ -71,7 +77,7 @@ export const IssuesPage: React.FC = () => {
       setLoading(false);
       setSyncing(false);
     }
-  };
+  }, [isLive]);
 
   useEffect(() => {
     if (isLive) {
@@ -80,7 +86,45 @@ export const IssuesPage: React.FC = () => {
       setLoading(false);
       setError(null);
     }
-  }, [isLive]);
+  }, [isLive, loadAssignments]);
+
+  // Handle OAuth Popup Flow per AI Studio oauth-integration skill
+  const handleConnectOAuth = async () => {
+    setConnectError(null);
+    try {
+      const redirectUri = `${window.location.origin}/api/github/user/callback`;
+      const { authUrl } = await githubService.getUserAuthUrl(redirectUri);
+      const authWindow = window.open(
+        authUrl,
+        'github_oauth_popup',
+        'width=600,height=750,menubar=no,toolbar=no'
+      );
+      if (!authWindow) {
+        setConnectError('Pop-up was blocked by your browser. Please allow pop-ups for this site to authorize with GitHub.');
+      }
+    } catch (err: any) {
+      setConnectError(err.message || 'Failed to initiate GitHub OAuth authorization flow.');
+    }
+  };
+
+  // Handle Manual Contributor Username Discovery
+  const handleConnectUsernameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualUsername.trim()) return;
+
+    setConnectingUser(true);
+    setConnectError(null);
+    try {
+      await connectUserByUsername(manualUsername.trim());
+      setShowConnectModal(false);
+      setManualUsername('');
+      await loadAssignments(true, manualUsername.trim());
+    } catch (err: any) {
+      setConnectError(err.message || `Failed to verify GitHub user "${manualUsername}".`);
+    } finally {
+      setConnectingUser(false);
+    }
+  };
 
   // Demo Mode issues mapping
   const getDemoGroupedIssues = (): RepositoryAssignmentGroup[] => {
@@ -136,7 +180,7 @@ export const IssuesPage: React.FC = () => {
     ];
   };
 
-  // Filter live issues and re-group
+  // Filter live issues and re-group by repository
   const getFilteredLiveGroups = (): RepositoryAssignmentGroup[] => {
     const filteredIssues = assignments.filter((issue) => {
       // Status filter
@@ -163,7 +207,8 @@ export const IssuesPage: React.FC = () => {
           issue.body.toLowerCase().includes(q) ||
           issue.repository.toLowerCase().includes(q) ||
           String(issue.number).includes(q) ||
-          issue.author.toLowerCase().includes(q)
+          issue.author.toLowerCase().includes(q) ||
+          issue.labels.some((l) => l.name.toLowerCase().includes(q))
         );
       }
 
@@ -194,7 +239,6 @@ export const IssuesPage: React.FC = () => {
   };
 
   const displayedGroups = isLive ? getFilteredLiveGroups() : getDemoGroupedIssues();
-  const totalDisplayedIssues = displayedGroups.reduce((acc, g) => acc + g.issuesCount, 0);
 
   // Available unique repositories for filter dropdown
   const uniqueRepos = isLive
@@ -213,34 +257,48 @@ export const IssuesPage: React.FC = () => {
     return date.toLocaleTimeString();
   };
 
-  // Badge helpers
-  const renderRepoAccessBadge = (status: RepositoryAccessStatus) => {
-    if (status === 'app_authorized') {
-      return (
-        <span className="px-2.5 py-0.5 rounded-full bg-tertiary-container/20 text-tertiary font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-tertiary/30">
-          <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
-          <span>GitHub App Authorized</span>
-        </span>
-      );
-    }
+  // Distinct Repository Access Indicators (Requirement 4)
+  const renderRepoAccessBadges = (issue: GitHubAssignedIssueRef) => {
     return (
-      <span className="px-2.5 py-0.5 rounded-full bg-sky-500/15 text-sky-800 font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-sky-500/30">
-        <span className="material-symbols-outlined text-[13px]">public</span>
-        <span>Public Repository Readable</span>
-      </span>
-    );
-  };
-
-  const renderWriteAccessBadge = (isAuthorized: boolean) => {
-    if (!isAuthorized) {
-      return (
-        <span className="px-2 py-0.5 rounded-full bg-surface-container text-secondary font-code-sm text-[11px] font-medium border border-surface-container-high flex items-center gap-1">
-          <span className="material-symbols-outlined text-[12px]">lock</span>
-          <span>Write Access Not Authorized</span>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {/* 1. Issue Discovered Badge */}
+        <span
+          className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-primary-fixed/60 text-on-primary-fixed border border-primary/20 flex items-center gap-1"
+          title="This issue was actively discovered by COSInput assignment sync"
+        >
+          <span className="material-symbols-outlined text-[12px] text-primary">visibility</span>
+          <span>Issue Discovered</span>
         </span>
-      );
-    }
-    return null;
+
+        {/* 2. Public Repository Readable Badge */}
+        <span
+          className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-sky-500/15 text-sky-800 border border-sky-500/30 flex items-center gap-1"
+          title="Repository specifications and files are publicly readable"
+        >
+          <span className="material-symbols-outlined text-[12px]">public</span>
+          <span>Public Repository Readable</span>
+        </span>
+
+        {/* 3 & 4. GitHub App Authorized vs Write Access Not Authorized */}
+        {issue.repoAuthorizationStatus === 'app_authorized' ? (
+          <span
+            className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-tertiary-container/25 text-tertiary border border-tertiary/30 flex items-center gap-1"
+            title="Repository is installed in COSInput GitHub App with write authorization"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+            <span>GitHub App Authorized</span>
+          </span>
+        ) : (
+          <span
+            className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-amber-500/15 text-amber-900 border border-amber-500/30 flex items-center gap-1"
+            title="Write access (branches, PRs) requires GitHub App installation by repository maintainer"
+          >
+            <span className="material-symbols-outlined text-[12px] text-amber-700">lock</span>
+            <span>Write Access Not Authorized</span>
+          </span>
+        )}
+      </div>
+    );
   };
 
   const renderContributionStatusBadge = (status: COSInputContributionStatus) => {
@@ -261,7 +319,7 @@ export const IssuesPage: React.FC = () => {
       case 'blocked':
         return (
           <span className="px-2 py-0.5 rounded-full bg-error-container text-error font-code-sm text-[11px] font-bold">
-            Blocked
+            Failed / Blocked
           </span>
         );
       default:
@@ -289,16 +347,10 @@ export const IssuesPage: React.FC = () => {
             >
               {isLive ? 'LIVE GITHUB' : 'DEMO MODE'}
             </span>
-            {currentUser && isLive && (
-              <span className="px-2 py-0.5 rounded bg-surface-container text-on-surface font-code-sm text-[11px] font-semibold flex items-center gap-1">
-                <span className="material-symbols-outlined text-[14px] text-tertiary">verified_user</span>
-                @{currentUser.login}
-              </span>
-            )}
           </div>
           <p className="font-body-md text-body-md text-secondary">
             {isLive
-              ? 'Real open GitHub issues assigned to you across public and authorized repositories. Pull requests are filtered out.'
+              ? 'Discover and manage real open GitHub issues assigned to you across public repositories. Pull requests are strictly filtered out.'
               : 'Displaying offline demonstration assignment fixtures.'}
           </p>
         </div>
@@ -311,18 +363,31 @@ export const IssuesPage: React.FC = () => {
           </div>
 
           {isLive && (
-            <button
-              type="button"
-              disabled={syncing || loading}
-              onClick={() => loadAssignments(true)}
-              className="px-4 py-2 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50"
-              title="Queries GitHub for open issues assigned to you across public repositories"
-            >
-              <span className={`material-symbols-outlined text-[18px] ${syncing ? 'animate-spin' : ''}`}>
-                sync
-              </span>
-              <span>{syncing ? 'Syncing...' : 'Sync Now'}</span>
-            </button>
+            <>
+              {/* Sync GitHub Assignments / Sync Now Buttons */}
+              <button
+                type="button"
+                disabled={syncing || loading}
+                onClick={() => loadAssignments(true)}
+                className="px-4 py-2 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+                title="Queries GitHub for open issues assigned to you across public repositories"
+              >
+                <span className={`material-symbols-outlined text-[18px] ${syncing ? 'animate-spin' : ''}`}>
+                  sync
+                </span>
+                <span>{syncing ? 'Syncing...' : 'Sync Now'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowConnectModal(true)}
+                className="px-3.5 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm flex items-center gap-1.5 transition-colors"
+                title="Connect or change connected GitHub contributor user"
+              >
+                <span className="material-symbols-outlined text-[18px]">person_add</span>
+                <span>{connectedUser ? 'Switch User' : 'Connect User'}</span>
+              </button>
+            </>
           )}
 
           <button
@@ -337,7 +402,82 @@ export const IssuesPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Metrics & Status Banner */}
+      {/* 2. Connected Contributor Banner (Live Mode) */}
+      {isLive && (
+        <div className="p-4 rounded-xl bg-surface-container-lowest border border-surface-container shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            {currentUser?.avatarUrl ? (
+              <img
+                src={currentUser.avatarUrl}
+                alt={currentUser.login}
+                className="w-10 h-10 rounded-full object-cover ring-2 ring-primary shrink-0"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-primary-container text-on-primary flex items-center justify-center font-bold text-sm shrink-0">
+                {currentUser?.login?.slice(0, 2).toUpperCase() || 'GH'}
+              </div>
+            )}
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                  {currentUser ? `@${currentUser.login}` : 'No Contributor Connected'}
+                </span>
+                {currentUser && (
+                  <span className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-tertiary-fixed text-on-tertiary-fixed flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                    <span>
+                      {connectedUser?.authSource === 'oauth'
+                        ? 'OAuth Authorized'
+                        : connectedUser?.authSource === 'user_discovery'
+                        ? 'User Discovered'
+                        : 'App Account'}
+                    </span>
+                  </span>
+                )}
+              </div>
+              <span className="font-code-sm text-code-sm text-secondary">
+                {currentUser
+                  ? 'Showing assignments for this user across public repositories'
+                  : 'Connect your GitHub user to discover assigned issues without Personal Access Tokens (PATs)'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+            {currentUser ? (
+              <>
+                <button
+                  type="button"
+                  disabled={syncing || loading}
+                  onClick={() => loadAssignments(true)}
+                  className="px-3.5 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold border border-surface-container shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[16px]">sync</span>
+                  <span>Sync GitHub Assignments</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={disconnectUser}
+                  className="px-3 py-1.5 rounded-lg bg-surface-container-low hover:bg-error-container/20 text-secondary hover:text-error font-label-md text-label-md font-medium border border-surface-container transition-colors"
+                >
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowConnectModal(true)}
+                className="px-4 py-2 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-md flex items-center gap-2 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[18px]">login</span>
+                <span>Connect GitHub User</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. Metrics Summary Strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm">
           <span className="font-label-caps text-[10px] uppercase text-secondary font-bold">Assigned Issues</span>
@@ -362,7 +502,7 @@ export const IssuesPage: React.FC = () => {
               ? groupedRepos.filter((g) => g.repoAuthorizationStatus === 'app_authorized').length
               : 1}
           </div>
-          <span className="font-code-sm text-[11px] text-secondary">Installed on GitHub</span>
+          <span className="font-code-sm text-[11px] text-secondary">Write authorized by GitHub App</span>
         </div>
 
         <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm">
@@ -372,11 +512,11 @@ export const IssuesPage: React.FC = () => {
               ? groupedRepos.filter((g) => g.repoAuthorizationStatus === 'public_readable').length
               : 0}
           </div>
-          <span className="font-code-sm text-[11px] text-secondary">External open-source</span>
+          <span className="font-code-sm text-[11px] text-secondary">Discovered across public repos</span>
         </div>
       </div>
 
-      {/* 3. Search and Filter Bar */}
+      {/* 4. Search and Filter Bar */}
       <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm flex flex-col gap-3">
         <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
           {/* Status Tabs */}
@@ -441,14 +581,14 @@ export const IssuesPage: React.FC = () => {
           {/* Search Box */}
           <div className="relative min-w-[260px]">
             <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-[16px]">
-              filter_list
+              search
             </span>
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search title, #number, author..."
-              className="w-full h-8 pl-8 pr-3 bg-surface-container-low rounded-lg font-code-sm text-code-sm text-on-surface placeholder:text-secondary/70 focus:outline-none focus:ring-1 focus:ring-primary border border-surface-container"
+              placeholder="Search title, #number, author, labels..."
+              className="w-full h-9 pl-9 pr-3 bg-surface-container-low rounded-lg font-code-sm text-code-sm text-on-surface placeholder:text-secondary/70 focus:outline-none focus:ring-1 focus:ring-primary border border-surface-container"
             />
           </div>
         </div>
@@ -482,14 +622,14 @@ export const IssuesPage: React.FC = () => {
         )}
       </div>
 
-      {/* 4. Real Error Diagnostic Box (Never silent mock fallback) */}
+      {/* 5. Real Error Diagnostic Box (Never silent mock fallback) */}
       {isLive && error && (
         <div className="p-5 rounded-xl bg-error-container/20 border border-error/40 flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <span className="material-symbols-outlined text-error text-[24px] mt-0.5 shrink-0">error</span>
             <div className="flex flex-col gap-1">
               <span className="font-headline-sm text-headline-sm text-error font-bold">
-                {error.classification} (Status {error.statusCode})
+                {error.classification} {error.statusCode > 0 ? `(Status ${error.statusCode})` : ''}
               </span>
               <p className="font-body-md text-body-md text-on-surface">{error.message}</p>
               {error.retryAfterSeconds && (
@@ -497,8 +637,20 @@ export const IssuesPage: React.FC = () => {
                   Rate limit resets in {error.retryAfterSeconds} seconds.
                 </span>
               )}
+              {error.classification === 'AUTHENTICATION_FAILURE' && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowConnectModal(true)}
+                    className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">login</span>
+                    <span>Connect GitHub Account</span>
+                  </button>
+                </div>
+              )}
               <span className="font-code-sm text-code-sm text-secondary pt-1">
-                Strict Invariant: COSInput does not fall back to fake data on error. Please check your GitHub connection.
+                Strict Invariant: COSInput does not fall back to fake mock data on error. Please check your GitHub connection.
               </span>
             </div>
           </div>
@@ -512,7 +664,7 @@ export const IssuesPage: React.FC = () => {
         </div>
       )}
 
-      {/* 5. Loading Skeleton */}
+      {/* 6. Loading Skeleton */}
       {isLive && loading && (
         <div className="space-y-4">
           {[1, 2].map((n) => (
@@ -528,7 +680,7 @@ export const IssuesPage: React.FC = () => {
         </div>
       )}
 
-      {/* 6. Empty State */}
+      {/* 7. Empty State */}
       {!loading && !error && displayedGroups.length === 0 && (
         <div className="bg-surface-container-lowest rounded-xl p-10 border border-surface-container text-center flex flex-col items-center gap-3">
           <span className="material-symbols-outlined text-outline text-[48px]">assignment_turned_in</span>
@@ -541,19 +693,29 @@ export const IssuesPage: React.FC = () => {
               : 'No mock issues match your query.'}
           </p>
           {isLive && (
-            <button
-              type="button"
-              onClick={() => loadAssignments(true)}
-              className="mt-2 px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm flex items-center gap-1.5"
-            >
-              <span className="material-symbols-outlined text-[16px]">sync</span>
-              <span>Sync GitHub Assignments</span>
-            </button>
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                type="button"
+                onClick={() => loadAssignments(true)}
+                className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm flex items-center gap-1.5 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">sync</span>
+                <span>Sync GitHub Assignments</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowConnectModal(true)}
+                className="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm flex items-center gap-1.5"
+              >
+                <span className="material-symbols-outlined text-[16px]">person_search</span>
+                <span>Search Another User</span>
+              </button>
+            </div>
           )}
         </div>
       )}
 
-      {/* 7. Grouped Issues by Repository */}
+      {/* 8. Grouped Issues by Repository */}
       {!loading && !error && displayedGroups.length > 0 && (
         <div className="space-y-6">
           {displayedGroups.map((group) => (
@@ -575,10 +737,25 @@ export const IssuesPage: React.FC = () => {
                   </span>
                 </div>
 
-                {/* Repository Access Badges */}
+                {/* Repository-level Authorization Badges */}
                 <div className="flex items-center gap-2 flex-wrap shrink-0">
-                  {renderRepoAccessBadge(group.repoAuthorizationStatus)}
-                  {renderWriteAccessBadge(group.writeAccessAuthorized)}
+                  {group.repoAuthorizationStatus === 'app_authorized' ? (
+                    <span className="px-2.5 py-0.5 rounded-full bg-tertiary-container/20 text-tertiary font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-tertiary/30">
+                      <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                      <span>GitHub App Authorized</span>
+                    </span>
+                  ) : (
+                    <>
+                      <span className="px-2.5 py-0.5 rounded-full bg-sky-500/15 text-sky-800 font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-sky-500/30">
+                        <span className="material-symbols-outlined text-[13px]">public</span>
+                        <span>Public Repository Readable</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-900 font-code-sm text-[11px] font-medium border border-amber-500/30 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[12px]">lock</span>
+                        <span>Write Access Not Authorized</span>
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -634,6 +811,11 @@ export const IssuesPage: React.FC = () => {
                           {issue.body}
                         </p>
                       )}
+
+                      {/* Repository Access Badges (Requirement 4) */}
+                      <div className="pl-7 pt-1">
+                        {renderRepoAccessBadges(issue)}
+                      </div>
 
                       {/* Labels */}
                       {issue.labels.length > 0 && (
@@ -710,7 +892,100 @@ export const IssuesPage: React.FC = () => {
         </div>
       )}
 
-      {/* 8. Start Contribution Gate Modal (Safety Invariant: Read-Only in v0.2.1) */}
+      {/* 9. Connect GitHub User Modal */}
+      {showConnectModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface-container-lowest rounded-2xl max-w-lg w-full p-6 border border-surface-container shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-primary-container text-on-primary flex items-center justify-center shrink-0">
+                  <span className="material-symbols-outlined text-[22px]">person_pin</span>
+                </div>
+                <div>
+                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    Connect GitHub Contributor
+                  </h3>
+                  <p className="font-body-sm text-body-sm text-secondary">
+                    Identifies you and discovers assigned issues across public repositories.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowConnectModal(false)}
+                className="p-1.5 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </div>
+
+            {connectError && (
+              <div className="p-3 rounded-lg bg-error-container/20 border border-error/40 text-error text-body-sm font-body-sm flex items-start gap-2">
+                <span className="material-symbols-outlined text-[18px] shrink-0 mt-0.5">error</span>
+                <span>{connectError}</span>
+              </div>
+            )}
+
+            {/* Option A: Connect via OAuth */}
+            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+              <span className="text-secondary text-[11px] font-bold uppercase tracking-wider block">
+                Recommended: Standard GitHub OAuth
+              </span>
+              <p className="font-body-sm text-body-sm text-secondary">
+                Authorizes your contributor profile securely using the COSInput GitHub App OAuth credentials. Tokens remain server-side.
+              </p>
+              <button
+                type="button"
+                onClick={handleConnectOAuth}
+                className="mt-2 w-full py-2.5 px-4 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[18px]">verified_user</span>
+                <span>Authorize with GitHub (OAuth)</span>
+              </button>
+            </div>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="h-px bg-surface-container-high flex-1"></div>
+              <span className="text-outline text-xs uppercase font-semibold">Or Connect by Username</span>
+              <div className="h-px bg-surface-container-high flex-1"></div>
+            </div>
+
+            {/* Option B: Connect by Username */}
+            <form onSubmit={handleConnectUsernameSubmit} className="space-y-3">
+              <div>
+                <label className="block text-secondary font-code-sm text-code-sm font-semibold mb-1">
+                  GitHub Handle (Public Discovery)
+                </label>
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-outline text-sm">@</span>
+                    <input
+                      type="text"
+                      value={manualUsername}
+                      onChange={(e) => setManualUsername(e.target.value)}
+                      placeholder="e.g. AnnieIj, octocat, torvalds"
+                      className="w-full h-10 pl-8 pr-3 bg-surface-container-low rounded-lg font-code-sm text-code-sm text-on-surface placeholder:text-secondary/60 focus:outline-none focus:ring-1 focus:ring-primary border border-surface-container"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={connectingUser || !manualUsername.trim()}
+                    className="px-4 h-10 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-headline-sm text-headline-sm font-semibold border border-surface-container shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    {connectingUser ? 'Verifying...' : 'Discover'}
+                  </button>
+                </div>
+              </div>
+              <span className="font-code-sm text-[11px] text-secondary block">
+                Never requires PATs. Queries public GitHub metadata to identify assignments across public repositories.
+              </span>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 10. Start Contribution Gate Modal (Safety Invariant: Read-Only in v0.2.1) */}
       {selectedIssueForGate && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-surface-container-lowest rounded-2xl max-w-xl w-full p-6 border border-surface-container shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
@@ -721,7 +996,7 @@ export const IssuesPage: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
-                    Contribution Workspace Gate
+                    Contribution Gate
                   </h3>
                   <span className="font-code-sm text-code-sm text-secondary font-mono">
                     {selectedIssueForGate.repository} #{selectedIssueForGate.number}
@@ -752,16 +1027,26 @@ export const IssuesPage: React.FC = () => {
                 <span className="text-secondary text-[11px] font-bold uppercase tracking-wider">
                   Repository Access Level
                 </span>
-                {renderRepoAccessBadge(selectedIssueForGate.repoAuthorizationStatus)}
+                {selectedIssueForGate.repoAuthorizationStatus === 'app_authorized' ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-tertiary-container/20 text-tertiary font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-tertiary/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                    <span>GitHub App Authorized</span>
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-900 font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-amber-500/30">
+                    <span className="material-symbols-outlined text-[13px] text-amber-700">lock</span>
+                    <span>Write Access Not Authorized</span>
+                  </span>
+                )}
               </div>
 
               {selectedIssueForGate.repoAuthorizationStatus === 'app_authorized' ? (
                 <p className="font-body-sm text-body-sm text-tertiary">
-                  ✓ This repository is authorized by the COSInput GitHub App. Ready for future automated branch orchestration and PR checks.
+                  ✓ Full GitHub App Authorization Active. Ready for future automated branch orchestration and PR checks.
                 </p>
               ) : (
                 <p className="font-body-sm text-body-sm text-amber-900 bg-amber-500/10 p-2.5 rounded-lg border border-amber-500/20">
-                  ℹ Public repository discovery active. COSInput can read specifications and verify criteria. Automated branch creation and PR submission in future phases will require the repository maintainer to install the COSInput GitHub App.
+                  ⚠️ <strong>Write Access Not Authorized:</strong> This repository is not installed in your COSInput GitHub App. COSInput can inspect issues and read specifications, but automated branch creation and PR submission will be blocked until the repository maintainer installs the COSInput GitHub App.
                 </p>
               )}
             </div>

@@ -31,6 +31,12 @@ async function startServer() {
   // Mount GitHub integration API routes
   app.use('/api/github', githubRouter);
 
+  // Mount OAuth callback alias at root level (/auth/callback)
+  app.use('/auth/callback', (req, res, next) => {
+    req.url = '/user/callback' + (req.url === '/' ? '' : req.url);
+    githubRouter(req, res, next);
+  });
+
   // Basic healthcheck
   app.get('/api/health', (_req, res) => {
     res.json({

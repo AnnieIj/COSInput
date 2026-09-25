@@ -32,7 +32,8 @@ export interface IGitHubService {
   syncAssignments(username?: string): Promise<AssignmentSyncResult>;
   getAssignments(): Promise<AssignmentSyncResult>;
   getUserMe(): Promise<{ authenticated: boolean; user: any }>;
-  getUserAuthUrl(): Promise<{ authUrl: string; state: string }>;
+  getUserAuthUrl(redirectUri?: string): Promise<{ authUrl: string; state: string }>;
+  connectUserByUsername(username: string): Promise<{ success: boolean; user: any; syncResult?: AssignmentSyncResult }>;
   disconnectUser(): Promise<void>;
   listRepositories(): Promise<GitHubRepoSummary[]>;
   getRepository(owner: string, repo: string): Promise<GitHubRepoSummary | null>;
@@ -133,8 +134,19 @@ export class RealGitHubService implements IGitHubService {
     return this.fetchApi<{ authenticated: boolean; user: any }>('/api/github/user/me');
   }
 
-  async getUserAuthUrl(): Promise<{ authUrl: string; state: string }> {
-    return this.fetchApi<{ authUrl: string; state: string }>('/api/github/user/auth-url');
+  async getUserAuthUrl(redirectUri?: string): Promise<{ authUrl: string; state: string }> {
+    const params = new URLSearchParams();
+    if (redirectUri) params.set('redirect_uri', redirectUri);
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+    return this.fetchApi<{ authUrl: string; state: string }>(`/api/github/user/auth-url${queryString}`);
+  }
+
+  async connectUserByUsername(username: string): Promise<{ success: boolean; user: any; syncResult?: AssignmentSyncResult }> {
+    return this.fetchApi<{ success: boolean; user: any; syncResult?: AssignmentSyncResult }>('/api/github/user/connect-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
   }
 
   async disconnectUser(): Promise<void> {

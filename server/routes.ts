@@ -352,21 +352,30 @@ githubRouter.get('/assignments', async (_req, res) => {
  * GET /api/github/user/auth-url
  * Returns GitHub App user authorization (OAuth) URL.
  */
-githubRouter.get('/user/auth-url', (_req, res) => {
+githubRouter.get('/user/auth-url', (req, res) => {
   const config = getGitHubAppConfig();
   if (!config.clientId) {
     return res.status(400).json({
       error: {
         classification: 'AUTHENTICATION_FAILURE',
         statusCode: 400,
-        message: 'GitHub OAuth Client ID is not configured (GITHUB_CLIENT_ID).',
+        message: 'GitHub OAuth Client ID is not configured (GITHUB_CLIENT_ID). Set GITHUB_CLIENT_ID in your environment variables.',
       },
     });
   }
 
+  const redirectUri = req.query.redirect_uri as string | undefined;
   const state = Math.random().toString(36).substring(2, 15);
-  const authUrl = `https://github.com/login/oauth/authorize?client_id=${config.clientId}&scope=read:user&state=${state}`;
+  const params = new URLSearchParams({
+    client_id: config.clientId,
+    scope: 'read:user',
+    state,
+  });
+  if (redirectUri) {
+    params.set('redirect_uri', redirectUri);
+  }
 
+  const authUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
   res.json({ authUrl, state });
 });
 
@@ -374,8 +383,9 @@ githubRouter.get('/user/auth-url', (_req, res) => {
  * GET /api/github/user/callback
  * Exchanges code for token server-side and stores token in server memory.
  * Never returns the token to the browser.
+ * Sends postMessage to opener for seamless popup-based OAuth.
  */
-githubRouter.get('/user/callback', async (req, res) => {
+githubRouter.get(['/user/callback', '/user/callback/'], async (req, res) => {
   try {
     const code = req.query.code as string;
     if (!code) {
@@ -386,10 +396,97 @@ githubRouter.get('/user/callback', async (req, res) => {
     // Automatically trigger initial assignment sync for the newly authorized user
     await assignmentSyncService.syncAssignments(profile.login).catch(() => {});
 
-    // Safe redirect back to issues page
-    res.redirect('/issues?auth=success');
+    // Safe HTML response for popup communication or direct redirect fallback
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>GitHub Authorization - COSInput</title>
+          <meta charset="utf-8" />
+        </head>
+        <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #f8f9ff; color: #0b1c30;">
+          <h2 style="color: #3525cd;">GitHub Connected Successfully</h2>
+          <p>Authenticated as <strong>@${profile.login}</strong>.</p>
+          <p>Closing window...</p>
+          <script>
+            try {
+              if (window.opener) {
+                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', user: { login: ${JSON.stringify(profile.login)} } }, '*');
+                window.close();
+              } else {
+                window.location.href = '/issues?auth=success';
+              }
+            } catch (e) {
+              window.location.href = '/issues?auth=success';
+            }
+          </script>
+        </body>
+      </html>
+    `);
   } catch (err: any) {
-    res.redirect(`/issues?auth=error&message=${encodeURIComponent(err.message || 'Authorization failed')}`);
+    const errorMsg = err.message || 'Authorization failed';
+    res.status(err.statusCode || 500).send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Authorization Failed - COSInput</title>
+          <meta charset="utf-8" />
+        </head>
+        <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #f8f9ff; color: #ba1a1a;">
+          <h2>GitHub Authorization Error</h2>
+          <p>${errorMsg}</p>
+          <p>You can close this window and try again.</p>
+          <script>
+            try {
+              if (window.opener) {
+                window.opener.postMessage({ type: 'OAUTH_AUTH_FAILURE', error: ${JSON.stringify(errorMsg)} }, '*');
+                setTimeout(() => window.close(), 3000);
+              } else {
+                window.location.href = '/issues?auth=error&message=' + encodeURIComponent(${JSON.stringify(errorMsg)});
+              }
+            } catch (e) {}
+          </script>
+        </body>
+      </html>
+    `);
+  }
+});
+
+/**
+ * POST /api/github/user/connect-user
+ * Connects a contributor by GitHub handle (verifying against public GitHub API).
+ * Never uses PATs. Enables assignment discovery even before full OAuth app credentials are set up.
+ */
+githubRouter.post('/user/connect-user', async (req, res) => {
+  try {
+    const username = req.body?.username;
+    if (!username || typeof username !== 'string' || !username.trim()) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'GitHub username is required.',
+        },
+      });
+    }
+
+    const profile = await userAuthStore.connectByUsername(username.trim());
+    const syncResult = await assignmentSyncService.syncAssignments(profile.login).catch(() => null);
+
+    res.json({
+      success: true,
+      user: profile,
+      syncResult,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to connect GitHub user.',
+      },
+    });
   }
 });
 
@@ -430,9 +527,10 @@ githubRouter.get('/user/me', async (_req, res) => {
 
 /**
  * POST /api/github/user/disconnect
- * Clears user session.
+ * Clears user session and resets assignment cache.
  */
 githubRouter.post('/user/disconnect', (_req, res) => {
   userAuthStore.clearSession();
-  res.json({ success: true, message: 'User session cleared.' });
+  assignmentSyncService.clearCache();
+  res.json({ success: true, message: 'User session and assignment cache cleared.' });
 });

@@ -89,7 +89,7 @@ export interface GitHubUserProfile {
   login: string;
   name: string;
   avatarUrl: string;
-  authSource: 'oauth' | 'installation_account';
+  authSource: 'oauth' | 'installation_account' | 'user_discovery';
   authenticatedAt: string;
 }
 
