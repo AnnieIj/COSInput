@@ -7,6 +7,8 @@ import { getGitHubAppConfig } from './config';
 import { githubServerClient } from './githubClient';
 import { verifyGitHubWebhookSignature, processVerifiedWebhook } from './webhookHandler';
 import { getRecentWebhookEvents } from './eventStore';
+import { assignmentSyncService } from './assignmentSyncService';
+import { userAuthStore } from './userAuthStore';
 
 export const githubRouter = Router();
 
@@ -172,18 +174,18 @@ githubRouter.get('/issues/:owner/:repo/:number', async (req, res) => {
     const { owner, repo, number } = req.params;
     const issueNumber = parseInt(number, 10);
 
-    const installations = await githubServerClient.listInstallations();
-    if (installations.length === 0) {
-      return res.status(404).json({
-        error: {
-          classification: 'NOT_FOUND',
-          statusCode: 404,
-          message: 'No GitHub App installation found.',
-        },
-      });
+    const userToken = userAuthStore.getUserToken();
+    let installationId: number | null = null;
+    try {
+      const installations = await githubServerClient.listInstallations();
+      if (installations.length > 0) {
+        installationId = installations[0].id;
+      }
+    } catch {
+      // Continue with user token if installation list fails
     }
 
-    const issue = await githubServerClient.getIssue(installations[0].id, owner, repo, issueNumber);
+    const issue = await githubServerClient.getIssue(installationId, owner, repo, issueNumber, userToken || undefined);
     res.json({ issue });
   } catch (err: any) {
     const status = err.statusCode || 500;
@@ -200,12 +202,18 @@ githubRouter.get('/issues/:owner/:repo/:number/comments', async (req, res) => {
     const { owner, repo, number } = req.params;
     const issueNumber = parseInt(number, 10);
 
-    const installations = await githubServerClient.listInstallations();
-    if (installations.length === 0) {
-      return res.status(404).json({ error: { classification: 'NOT_FOUND', statusCode: 404, message: 'No installation found.' } });
+    const userToken = userAuthStore.getUserToken();
+    let installationId: number | null = null;
+    try {
+      const installations = await githubServerClient.listInstallations();
+      if (installations.length > 0) {
+        installationId = installations[0].id;
+      }
+    } catch {
+      // Continue with user token
     }
 
-    const comments = await githubServerClient.listIssueComments(installations[0].id, owner, repo, issueNumber);
+    const comments = await githubServerClient.listIssueComments(installationId, owner, repo, issueNumber, userToken || undefined);
     res.json({ comments });
   } catch (err: any) {
     const status = err.statusCode || 500;
@@ -296,4 +304,135 @@ githubRouter.post('/webhooks', (req: any, res) => {
 githubRouter.get('/webhooks/events', (_req, res) => {
   const events = getRecentWebhookEvents(30);
   res.json({ events });
+});
+
+/**
+ * POST /api/github/assignments/sync
+ * Manually synchronizes assigned GitHub issues across public and authorized repositories.
+ * Strictly read-only: never modifies any repository or triggers AI coding runs.
+ */
+githubRouter.post('/assignments/sync', async (req, res) => {
+  try {
+    const targetUser = req.body?.username as string | undefined;
+    const result = await assignmentSyncService.syncAssignments(targetUser);
+    res.json(result);
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to synchronize assigned GitHub issues.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/assignments
+ * Returns the latest discovered assignments grouped by repository.
+ */
+githubRouter.get('/assignments', async (_req, res) => {
+  try {
+    const result = await assignmentSyncService.getAssignments();
+    res.json(result);
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to retrieve assigned GitHub issues.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/user/auth-url
+ * Returns GitHub App user authorization (OAuth) URL.
+ */
+githubRouter.get('/user/auth-url', (_req, res) => {
+  const config = getGitHubAppConfig();
+  if (!config.clientId) {
+    return res.status(400).json({
+      error: {
+        classification: 'AUTHENTICATION_FAILURE',
+        statusCode: 400,
+        message: 'GitHub OAuth Client ID is not configured (GITHUB_CLIENT_ID).',
+      },
+    });
+  }
+
+  const state = Math.random().toString(36).substring(2, 15);
+  const authUrl = `https://github.com/login/oauth/authorize?client_id=${config.clientId}&scope=read:user&state=${state}`;
+
+  res.json({ authUrl, state });
+});
+
+/**
+ * GET /api/github/user/callback
+ * Exchanges code for token server-side and stores token in server memory.
+ * Never returns the token to the browser.
+ */
+githubRouter.get('/user/callback', async (req, res) => {
+  try {
+    const code = req.query.code as string;
+    if (!code) {
+      return res.status(400).send('Missing code parameter.');
+    }
+
+    const { profile } = await userAuthStore.exchangeCodeForToken(code);
+    // Automatically trigger initial assignment sync for the newly authorized user
+    await assignmentSyncService.syncAssignments(profile.login).catch(() => {});
+
+    // Safe redirect back to issues page
+    res.redirect('/issues?auth=success');
+  } catch (err: any) {
+    res.redirect(`/issues?auth=error&message=${encodeURIComponent(err.message || 'Authorization failed')}`);
+  }
+});
+
+/**
+ * GET /api/github/user/me
+ * Returns current authenticated contributor profile without exposing secrets.
+ */
+githubRouter.get('/user/me', async (_req, res) => {
+  const oauthProfile = userAuthStore.getUserProfile();
+  if (oauthProfile) {
+    return res.json({
+      authenticated: true,
+      user: oauthProfile,
+    });
+  }
+
+  // Fall back to connected GitHub App installation account
+  const appStatus = await githubServerClient.getConnectionStatus();
+  if (appStatus.activeInstallation) {
+    return res.json({
+      authenticated: true,
+      user: {
+        id: String(appStatus.activeInstallation.id),
+        login: appStatus.activeInstallation.accountLogin,
+        name: appStatus.activeInstallation.accountLogin,
+        avatarUrl: appStatus.activeInstallation.accountAvatarUrl,
+        authSource: 'installation_account',
+        authenticatedAt: appStatus.activeInstallation.updatedAt,
+      },
+    });
+  }
+
+  res.json({
+    authenticated: false,
+    user: null,
+  });
+});
+
+/**
+ * POST /api/github/user/disconnect
+ * Clears user session.
+ */
+githubRouter.post('/user/disconnect', (_req, res) => {
+  userAuthStore.clearSession();
+  res.json({ success: true, message: 'User session cleared.' });
 });

@@ -298,18 +298,28 @@ export class GitHubServerClient {
   /**
    * Retrieves single issue details.
    */
-  async getIssue(installationId: number, owner: string, repo: string, issueNumber: number) {
-    const token = await getInstallationAccessToken(installationId);
+  async getIssue(installationId: number | null | undefined, owner: string, repo: string, issueNumber: number, customToken?: string) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Continue even if installation token fails; will try unauthenticated if public
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.2.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'COSInput-Server/0.2',
-        },
-      }
+      { headers }
     );
 
     if (!response.ok) {
@@ -352,18 +362,28 @@ export class GitHubServerClient {
   /**
    * Retrieves comments on an issue.
    */
-  async listIssueComments(installationId: number, owner: string, repo: string, issueNumber: number) {
-    const token = await getInstallationAccessToken(installationId);
+  async listIssueComments(installationId: number | null | undefined, owner: string, repo: string, issueNumber: number, customToken?: string) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Fallback
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.2.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=50`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'COSInput-Server/0.2',
-        },
-      }
+      { headers }
     );
 
     if (!response.ok) {

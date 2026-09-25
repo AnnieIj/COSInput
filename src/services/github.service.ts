@@ -8,6 +8,8 @@ import type {
   GitHubUser,
   GitHubRepoSummary,
   GitHubIssueRef,
+  GitHubAssignedIssueRef,
+  AssignmentSyncResult,
   GitHubIssueCommentRef,
   GitHubFileContent,
   GitHubDirectoryItem,
@@ -27,6 +29,11 @@ export interface IGitHubService {
   }>;
   getAuthUrl(): Promise<{ installationUrl: string; appSlug: string }>;
   getAuthenticatedUser(): Promise<GitHubUser | null>;
+  syncAssignments(username?: string): Promise<AssignmentSyncResult>;
+  getAssignments(): Promise<AssignmentSyncResult>;
+  getUserMe(): Promise<{ authenticated: boolean; user: any }>;
+  getUserAuthUrl(): Promise<{ authUrl: string; state: string }>;
+  disconnectUser(): Promise<void>;
   listRepositories(): Promise<GitHubRepoSummary[]>;
   getRepository(owner: string, repo: string): Promise<GitHubRepoSummary | null>;
   listIssues(
@@ -108,6 +115,30 @@ export class RealGitHubService implements IGitHubService {
       authorized: true,
       syncedAt: inst.updatedAt || new Date().toISOString(),
     };
+  }
+
+  async syncAssignments(username?: string): Promise<AssignmentSyncResult> {
+    return this.fetchApi<AssignmentSyncResult>('/api/github/assignments/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+  }
+
+  async getAssignments(): Promise<AssignmentSyncResult> {
+    return this.fetchApi<AssignmentSyncResult>('/api/github/assignments');
+  }
+
+  async getUserMe(): Promise<{ authenticated: boolean; user: any }> {
+    return this.fetchApi<{ authenticated: boolean; user: any }>('/api/github/user/me');
+  }
+
+  async getUserAuthUrl(): Promise<{ authUrl: string; state: string }> {
+    return this.fetchApi<{ authUrl: string; state: string }>('/api/github/user/auth-url');
+  }
+
+  async disconnectUser(): Promise<void> {
+    await this.fetchApi('/api/github/user/disconnect', { method: 'POST' });
   }
 
   async listRepositories(): Promise<GitHubRepoSummary[]> {

@@ -59,6 +59,64 @@ export interface GitHubRepoSummary {
   };
 }
 
+export type RepositoryAccessStatus =
+  | 'app_authorized'
+  | 'public_readable'
+  | 'write_not_authorized';
+
+export type COSInputContributionStatus =
+  | 'discovered'
+  | 'ready'
+  | 'in_progress'
+  | 'completed'
+  | 'blocked';
+
+export interface GitHubAssignedIssueRef {
+  id: string;
+  number: number;
+  repository: string;
+  repositoryOwner: string;
+  repositoryName: string;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  author: string;
+  authorAvatarUrl?: string;
+  labels: { name: string; color: string; description?: string }[];
+  assignees: string[];
+  commentsCount: number;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string | null;
+  htmlUrl: string;
+  repoAuthorizationStatus: RepositoryAccessStatus;
+  writeAccessAuthorized: boolean;
+  contributionStatus: COSInputContributionStatus;
+}
+
+export interface RepositoryAssignmentGroup {
+  fullName: string;
+  owner: string;
+  name: string;
+  repoAuthorizationStatus: RepositoryAccessStatus;
+  writeAccessAuthorized: boolean;
+  issuesCount: number;
+  issues: GitHubAssignedIssueRef[];
+}
+
+export interface AssignmentSyncResult {
+  success: boolean;
+  count: number;
+  lastSyncedAt: string;
+  user: {
+    login: string;
+    avatarUrl?: string;
+    id?: string;
+  } | null;
+  issues: GitHubAssignedIssueRef[];
+  groupedByRepository: RepositoryAssignmentGroup[];
+}
+
 export interface GitHubIssueRef {
   id: string;
   number: number;
