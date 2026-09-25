@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Sidebar } from '../common/Sidebar';
 import { Header } from '../common/Header';
+import { DemoModeBanner } from '../common/DemoModeBanner';
 
 export const AppLayout: React.FC = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -17,8 +18,9 @@ export const AppLayout: React.FC = () => {
       {/* Main Canvas Area shifted 64 (16rem) on desktop */}
       <div className="lg:pl-64 flex flex-col min-h-screen">
         <Header onOpenMobileMenu={() => setMobileMenuOpen(true)} />
+        <DemoModeBanner />
 
-        <main className="w-full pt-16 flex-1 bg-surface">
+        <main className="w-full flex-1 bg-surface">
           <Outlet />
         </main>
       </div>

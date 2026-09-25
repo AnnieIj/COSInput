@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { COSInputLogo } from './COSInputLogo';
+import { useMode } from '../../context/ModeContext';
 
 interface SidebarProps {
   mobileOpen?: boolean;
@@ -9,6 +10,49 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMobile }) => {
   const navigate = useNavigate();
+  const { mode, currentUser, isGitHubSynced, connectionState, statusData } = useMode();
+
+  const getProfileInfo = () => {
+    if (mode === 'demo') {
+      return {
+        username: '@alex-chen-dev',
+        badge: 'Demo Account (Authorized)',
+        statusText: 'Synced',
+        statusColor: 'bg-tertiary-fixed text-tertiary-fixed',
+        id: '884920',
+      };
+    }
+
+    if (currentUser) {
+      return {
+        username: `@${currentUser.login}`,
+        badge: 'GitHub App Connected',
+        statusText: 'Synced',
+        statusColor: 'bg-tertiary-fixed text-tertiary-fixed',
+        id: currentUser.id,
+      };
+    }
+
+    let statusText = 'Not Connected';
+    let statusColor = 'bg-secondary text-secondary';
+    if (connectionState === 'AUTH_FAILED') {
+      statusText = 'Auth Failed';
+      statusColor = 'bg-error text-error';
+    } else if (connectionState === 'APP_NOT_INSTALLED') {
+      statusText = 'Not Installed';
+      statusColor = 'bg-amber-400 text-amber-400';
+    }
+
+    return {
+      username: 'GitHub App',
+      badge: 'Configure in Settings',
+      statusText,
+      statusColor,
+      id: statusData?.appSlug ? `@${statusData.appSlug}` : 'Unlinked',
+    };
+  };
+
+  const profile = getProfileInfo();
 
   return (
     <>
@@ -69,10 +113,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
                 </span>
                 <div className="flex flex-col min-w-0">
                   <span className="font-label-caps text-[10px] text-outline-variant uppercase tracking-wider">
-                    Active Repository
+                    {mode === 'demo' ? 'Active Repository' : isGitHubSynced ? 'Authorized Repository' : 'Repository Setup'}
                   </span>
                   <span className="font-code-sm text-code-sm text-surface-container-lowest truncate font-medium">
-                    DigiNodes / truthbounty-frontend
+                    {mode === 'demo'
+                      ? 'DigiNodes / truthbounty-frontend'
+                      : isGitHubSynced
+                      ? 'Authorized via App'
+                      : 'Connect in Settings'}
                   </span>
                 </div>
               </div>
@@ -123,7 +171,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
                 <span className="font-body-md text-body-md">Issues</span>
               </div>
               <span className="px-1.5 py-0.5 rounded-full bg-surface-container-high/30 text-surface-container-lowest font-code-sm text-code-sm">
-                14
+                {mode === 'demo' ? '14' : isGitHubSynced ? 'Real' : '0'}
               </span>
             </NavLink>
 
@@ -164,7 +212,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
                 <span className="font-body-md text-body-md">Pull Requests</span>
               </div>
               <span className="px-1.5 py-0.5 rounded-full bg-surface-container-high/30 text-surface-container-lowest font-code-sm text-code-sm">
-                3
+                {mode === 'demo' ? '3' : 'Live'}
               </span>
             </NavLink>
 
@@ -269,29 +317,42 @@ export const Sidebar: React.FC<SidebarProps> = ({ mobileOpen = false, onCloseMob
         </div>
 
         {/* Bottom User Profile Section */}
-        <div className="p-3 m-3 rounded-xl bg-surface-container-highest/10 border border-white/5 shadow-sm">
+        <div
+          onClick={() => navigate('/settings')}
+          className="p-3 m-3 rounded-xl bg-surface-container-highest/10 border border-white/5 shadow-sm cursor-pointer hover:bg-white/10 transition-colors"
+        >
           <div className="flex items-center justify-between pb-2 border-b border-white/10">
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center font-code-sm text-code-sm font-semibold text-on-primary shrink-0">
-                AC
-              </div>
+              {currentUser?.avatarUrl ? (
+                <img
+                  src={currentUser.avatarUrl}
+                  alt={currentUser.login}
+                  className="w-8 h-8 rounded-full object-cover shrink-0"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-primary-container flex items-center justify-center font-code-sm text-code-sm font-semibold text-on-primary shrink-0">
+                  {profile.username.slice(1, 3).toUpperCase()}
+                </div>
+              )}
               <div className="flex flex-col min-w-0">
                 <span className="font-headline-sm text-headline-sm text-surface-container-lowest leading-none truncate font-medium">
-                  @alex-chen-dev
+                  {profile.username}
                 </span>
                 <span className="font-label-caps text-[10px] text-outline-variant mt-0.5 truncate">
-                  GitHub App Authorized
+                  {profile.badge}
                 </span>
               </div>
             </div>
           </div>
           <div className="flex items-center justify-between pt-2">
             <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-tertiary-fixed"></span>
-              <span className="font-code-sm text-code-sm text-tertiary-fixed">Synced</span>
+              <span className={`w-2 h-2 rounded-full ${profile.statusColor.split(' ')[0]}`}></span>
+              <span className="font-code-sm text-code-sm text-tertiary-fixed">
+                {profile.statusText}
+              </span>
             </div>
             <span className="font-code-sm text-code-sm text-secondary-fixed-dim font-mono">
-              ID: 884920
+              ID: {profile.id}
             </span>
           </div>
         </div>

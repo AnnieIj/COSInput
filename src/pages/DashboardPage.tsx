@@ -1,11 +1,30 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useMode } from '../context/ModeContext';
+import { githubService } from '../services/github.service';
 import { mockRepositories, mockIssues, mockContribution381, mockGuardianPR405 } from '../data/mock';
 import { IssueCard } from '../components/common/IssueCard';
 import { RepositoryCard } from '../components/common/RepositoryCard';
+import type { GitHubRepoSummary } from '../services/types';
 
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
+  const { mode, isLive, connectionState, currentUser } = useMode();
+  const [liveRepos, setLiveRepos] = useState<GitHubRepoSummary[]>([]);
+  const [loadingRepos, setLoadingRepos] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (isLive && connectionState === 'APP_INSTALLED') {
+      setLoadingRepos(true);
+      githubService
+        .listRepositories()
+        .then((repos) => setLiveRepos(repos))
+        .catch(() => setLiveRepos([]))
+        .finally(() => setLoadingRepos(false));
+    } else {
+      setLiveRepos([]);
+    }
+  }, [isLive, connectionState]);
 
   return (
     <div className="w-full px-4 lg:px-8 py-6 flex flex-col gap-6 max-w-7xl mx-auto">
@@ -61,13 +80,19 @@ export const DashboardPage: React.FC = () => {
 
         <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm flex flex-col justify-between">
           <span className="font-label-caps text-[10px] uppercase text-secondary font-bold">
-            Indexed Repositories
+            Authorized Repositories
           </span>
           <div className="flex items-baseline gap-2 my-2">
-            <span className="font-headline-xl text-headline-xl font-bold text-on-surface">3</span>
-            <span className="font-code-sm text-code-sm text-tertiary">All Synced</span>
+            <span className="font-headline-xl text-headline-xl font-bold text-on-surface">
+              {isLive ? (connectionState === 'APP_INSTALLED' ? liveRepos.length : 0) : mockRepositories.length}
+            </span>
+            <span className={`font-code-sm text-code-sm ${isLive && connectionState === 'APP_INSTALLED' ? 'text-tertiary' : isLive ? 'text-secondary' : 'text-amber-600'}`}>
+              {isLive ? (connectionState === 'APP_INSTALLED' ? 'Live GitHub' : 'Disconnected') : 'Demo Mode'}
+            </span>
           </div>
-          <span className="font-code-sm text-[11px] text-secondary">42 files cached</span>
+          <span className="font-code-sm text-[11px] text-secondary">
+            {isLive ? (connectionState === 'APP_INSTALLED' ? `${liveRepos.length} authorized repos` : 'Connect in Settings') : '3 offline fixtures'}
+          </span>
         </div>
 
         <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm flex flex-col justify-between">
@@ -211,9 +236,58 @@ export const DashboardPage: React.FC = () => {
             </div>
 
             <div className="flex flex-col gap-3">
-              {mockRepositories.slice(0, 2).map((repo) => (
-                <RepositoryCard key={repo.id} repo={repo} />
-              ))}
+              {isLive ? (
+                connectionState === 'APP_INSTALLED' ? (
+                  liveRepos.length > 0 ? (
+                    liveRepos.slice(0, 2).map((repo) => (
+                      <div
+                        key={repo.id}
+                        className="bg-surface-container-lowest rounded-xl p-4 border border-surface-container hover:border-primary shadow-sm flex flex-col justify-between gap-3 cursor-pointer"
+                        onClick={() => navigate(`/issues?repo=${encodeURIComponent(repo.fullName)}`)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-headline-sm text-headline-sm font-semibold text-on-surface font-mono truncate">
+                            {repo.fullName}
+                          </span>
+                          <span className="font-code-sm text-[10px] bg-tertiary-container/20 text-tertiary px-2 py-0.5 rounded font-bold uppercase">
+                            Live
+                          </span>
+                        </div>
+                        <p className="font-body-sm text-body-sm text-secondary line-clamp-1">
+                          {repo.description || 'No description provided.'}
+                        </p>
+                        <div className="flex items-center gap-3 font-code-sm text-code-sm text-secondary pt-1 border-t border-surface-container-low">
+                          <span>{repo.openIssuesCount} issues</span>
+                          <span>•</span>
+                          <span>★ {repo.stars}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container text-center text-secondary font-body-sm">
+                      No repositories authorized yet for this installation.
+                    </div>
+                  )
+                ) : (
+                  <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container flex flex-col items-center gap-2 text-center">
+                    <span className="material-symbols-outlined text-outline text-[28px]">extension_off</span>
+                    <span className="font-body-sm text-body-sm text-secondary">
+                      GitHub App is not connected in Live Mode.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/settings')}
+                      className="px-3 py-1.5 rounded-lg bg-primary-container text-on-primary font-label-md text-label-md font-semibold text-xs mt-1"
+                    >
+                      Connect in Settings
+                    </button>
+                  </div>
+                )
+              ) : (
+                mockRepositories.slice(0, 2).map((repo) => (
+                  <RepositoryCard key={repo.id} repo={repo} />
+                ))
+              )}
             </div>
           </div>
         </div>

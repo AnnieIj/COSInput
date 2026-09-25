@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useMode } from '../../context/ModeContext';
 
 interface HeaderProps {
   onOpenMobileMenu?: () => void;
@@ -8,11 +9,62 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
+  const { mode, setMode, isGitHubSynced, connectionState, currentUser } = useMode();
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && searchQuery.trim()) {
       navigate(`/issues?q=${encodeURIComponent(searchQuery.trim())}`);
     }
+  };
+
+  const getConnectionBadge = () => {
+    if (mode === 'demo') {
+      return (
+        <button
+          type="button"
+          onClick={() => setMode('live')}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-amber-500/15 border border-amber-500/30 text-amber-900 rounded-full font-code-sm text-code-sm font-semibold hover:bg-amber-500/25 transition-colors cursor-pointer"
+          title="Click to switch to Live GitHub Mode"
+        >
+          <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+          <span>Demo Mode</span>
+        </button>
+      );
+    }
+
+    if (isGitHubSynced) {
+      return (
+        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-surface-container-lowest border border-surface-container rounded-full shadow-sm">
+          <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+          <span className="font-code-sm text-code-sm text-tertiary font-semibold">GitHub Synced</span>
+        </div>
+      );
+    }
+
+    let label = 'GitHub Not Connected';
+    let dotColor = 'bg-secondary';
+    if (connectionState === 'APP_NOT_INSTALLED') {
+      label = 'App Not Installed';
+      dotColor = 'bg-amber-500';
+    } else if (connectionState === 'AUTH_FAILED') {
+      label = 'Auth Failed';
+      dotColor = 'bg-error';
+    } else if (connectionState === 'API_UNAVAILABLE') {
+      label = 'API Unavailable';
+      dotColor = 'bg-error';
+    }
+
+    return (
+      <button
+        type="button"
+        onClick={() => navigate('/settings')}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-surface-container-low border border-surface-container rounded-full hover:bg-surface-container text-secondary font-code-sm text-code-sm transition-colors cursor-pointer"
+        title="Configure GitHub Connection"
+      >
+        <span className={`w-2 h-2 rounded-full ${dotColor}`}></span>
+        <span>{label}</span>
+      </button>
+    );
   };
 
   return (
@@ -45,36 +97,21 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
           </kbd>
         </div>
 
-        {/* GitHub Synced & Repository Chip */}
+        {/* GitHub Connection Badge & Mode Switcher */}
         <div className="hidden xl:flex items-center gap-2">
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-surface-container-lowest rounded-full border border-surface-container shadow-sm">
-            <span className="w-2 h-2 rounded-full bg-tertiary"></span>
-            <span className="font-code-sm text-code-sm text-tertiary font-semibold">GitHub Synced</span>
-          </div>
+          {getConnectionBadge()}
           <button
             type="button"
-            onClick={() => navigate('/pull-requests')}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-surface-container-low hover:bg-surface-container transition-colors rounded-full cursor-pointer text-left"
+            onClick={() => setMode(mode === 'live' ? 'demo' : 'live')}
+            className="text-[11px] font-code-sm px-2 py-0.5 rounded border border-surface-container text-secondary hover:text-on-surface hover:bg-surface-container transition-colors"
           >
-            <span className="material-symbols-outlined text-primary text-[14px]">merge_type</span>
-            <span className="font-code-sm text-code-sm text-on-surface font-medium truncate max-w-[200px]">
-              DigiNodes / truthbounty-frontend #405
-            </span>
+            {mode === 'live' ? 'Switch to Demo' : 'Switch to Live'}
           </button>
         </div>
       </div>
 
       {/* Right Action Controls */}
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-        <button
-          type="button"
-          onClick={() => navigate('/contributions/381/conflicts')}
-          className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container-lowest hover:bg-surface-container text-on-surface font-label-md text-label-md font-medium border border-surface-container shadow-sm transition-all"
-        >
-          <span className="material-symbols-outlined text-[16px] text-primary">commit</span>
-          <span>Cherry-pick</span>
-        </button>
-
         <button
           type="button"
           onClick={() => navigate('/contributions/381')}
@@ -86,18 +123,30 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
 
         <button
           type="button"
+          onClick={() => navigate('/settings')}
           className="relative p-2 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container transition-colors"
-          aria-label="View notifications"
+          aria-label="View settings & notifications"
         >
           <span className="material-symbols-outlined text-[20px]">notifications</span>
-          <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-error"></span>
         </button>
 
         {/* Profile Avatar */}
-        <div className="flex items-center pl-1">
-          <div className="w-8 h-8 rounded-full bg-primary-container ring-2 ring-surface-container flex items-center justify-center font-bold text-on-primary text-xs shadow-sm overflow-hidden">
-            <span className="material-symbols-outlined text-[18px]">account_circle</span>
-          </div>
+        <div
+          onClick={() => navigate('/settings')}
+          className="flex items-center pl-1 cursor-pointer"
+          title="Account & GitHub App Settings"
+        >
+          {currentUser?.avatarUrl ? (
+            <img
+              src={currentUser.avatarUrl}
+              alt={currentUser.login}
+              className="w-8 h-8 rounded-full ring-2 ring-surface-container object-cover shadow-sm"
+            />
+          ) : (
+            <div className="w-8 h-8 rounded-full bg-primary-container ring-2 ring-surface-container flex items-center justify-center font-bold text-on-primary text-xs shadow-sm overflow-hidden font-mono">
+              {currentUser ? currentUser.login.slice(0, 2).toUpperCase() : 'CO'}
+            </div>
+          )}
         </div>
       </div>
     </header>

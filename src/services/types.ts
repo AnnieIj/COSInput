@@ -1,8 +1,34 @@
 /**
  * COSInput - Integration Service Types & Signatures
- * Note: These are contract definitions for future real integrations.
- * Current implementation uses explicit stubs; no live connections are claimed.
+ * Defines domain contracts for real GitHub App integration and execution services.
  */
+
+export type GitHubConnectionState =
+  | 'NOT_CONNECTED'
+  | 'CONNECTION_PENDING'
+  | 'CONNECTED'
+  | 'APP_NOT_INSTALLED'
+  | 'APP_INSTALLED'
+  | 'ACCESS_RESTRICTED'
+  | 'AUTH_FAILED'
+  | 'API_UNAVAILABLE'
+  | 'INSTALLATION_REVOKED';
+
+export type GitHubErrorClassification =
+  | 'AUTHENTICATION_FAILURE'
+  | 'AUTHORIZATION_FAILURE'
+  | 'RATE_LIMIT'
+  | 'NOT_FOUND'
+  | 'GITHUB_SERVICE_FAILURE'
+  | 'NETWORK_FAILURE';
+
+export interface SanitizedGitHubError {
+  classification: GitHubErrorClassification;
+  statusCode: number;
+  message: string;
+  documentationUrl?: string;
+  retryAfterSeconds?: number;
+}
 
 export interface GitHubUser {
   id: string;
@@ -21,17 +47,60 @@ export interface GitHubRepoSummary {
   defaultBranch: string;
   isPrivate: boolean;
   openIssuesCount: number;
-  openPRsCount: number;
+  stars: number;
+  forks: number;
+  updatedAt: string;
+  description: string;
+  htmlUrl: string;
+  permissions?: {
+    admin?: boolean;
+    push?: boolean;
+    pull?: boolean;
+  };
 }
 
 export interface GitHubIssueRef {
+  id: string;
   number: number;
+  repository: string;
   title: string;
   body: string;
-  labels: string[];
   state: 'open' | 'closed';
   author: string;
+  authorAvatarUrl: string;
+  labels: { name: string; color: string; description?: string }[];
+  assignees: string[];
+  commentsCount: number;
   createdAt: string;
+  updatedAt: string;
+  closedAt?: string | null;
+  htmlUrl: string;
+}
+
+export interface GitHubIssueCommentRef {
+  id: string;
+  author: string;
+  authorAvatarUrl: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  htmlUrl: string;
+}
+
+export interface GitHubFileContent {
+  name: string;
+  path: string;
+  sha: string;
+  size: number;
+  content: string;
+}
+
+export interface GitHubDirectoryItem {
+  name: string;
+  path: string;
+  sha: string;
+  size: number;
+  type: 'file' | 'dir';
 }
 
 export interface GitHubPRRef {

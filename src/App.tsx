@@ -5,6 +5,7 @@
 
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { ModeProvider } from './context/ModeContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { LandingPage } from './pages/LandingPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -22,40 +23,42 @@ import { SettingsPage } from './pages/SettingsPage';
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<AppLayout />}>
-          {/* Landing Screen */}
-          <Route path="/" element={<LandingPage />} />
+    <ModeProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<AppLayout />}>
+            {/* Landing Screen */}
+            <Route path="/" element={<LandingPage />} />
 
-          {/* Operations Dashboard */}
-          <Route path="/dashboard" element={<DashboardPage />} />
+            {/* Operations Dashboard */}
+            <Route path="/dashboard" element={<DashboardPage />} />
 
-          {/* Issues Directory & Details */}
-          <Route path="/issues" element={<IssuesPage />} />
-          <Route path="/issues/:issueId" element={<IssueDetailPage />} />
+            {/* Issues Directory & Details */}
+            <Route path="/issues" element={<IssuesPage />} />
+            <Route path="/issues/:issueId" element={<IssueDetailPage />} />
 
-          {/* Live Agent Runs & Continuous Execution Pipeline */}
-          <Route path="/runs/:runId" element={<LiveRunPage />} />
+            {/* Live Agent Runs & Continuous Execution Pipeline */}
+            <Route path="/runs/:runId" element={<LiveRunPage />} />
 
-          {/* Contribution Workspace Engine & Sub-Guardians */}
-          <Route path="/contributions/:id" element={<WorkspacePage />} />
-          <Route path="/contributions/:id/guardian" element={<GuardianCockpitPage />} />
-          <Route path="/contributions/:id/ci" element={<CIGuardianPage />} />
-          <Route path="/contributions/:id/conflicts" element={<MergeConflictPage />} />
-          <Route path="/contributions/:id/reviews" element={<ReviewsPage />} />
+            {/* Contribution Workspace Engine & Sub-Guardians */}
+            <Route path="/contributions/:id" element={<WorkspacePage />} />
+            <Route path="/contributions/:id/guardian" element={<GuardianCockpitPage />} />
+            <Route path="/contributions/:id/ci" element={<CIGuardianPage />} />
+            <Route path="/contributions/:id/conflicts" element={<MergeConflictPage />} />
+            <Route path="/contributions/:id/reviews" element={<ReviewsPage />} />
 
-          {/* Pull Requests & Repositories */}
-          <Route path="/pull-requests" element={<PullRequestsPage />} />
-          <Route path="/repositories" element={<RepositoriesPage />} />
+            {/* Pull Requests & Repositories */}
+            <Route path="/pull-requests" element={<PullRequestsPage />} />
+            <Route path="/repositories" element={<RepositoriesPage />} />
 
-          {/* Settings & Invariant Configuration */}
-          <Route path="/settings" element={<SettingsPage />} />
+            {/* Settings & Invariant Configuration */}
+            <Route path="/settings" element={<SettingsPage />} />
 
-          {/* Fallback Redirect */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+            {/* Fallback Redirect */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ModeProvider>
   );
 }
