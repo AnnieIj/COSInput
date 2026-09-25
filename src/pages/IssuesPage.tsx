@@ -1053,7 +1053,7 @@ export const IssuesPage: React.FC = () => {
 
             {/* Safety Invariant Notice */}
             <div className="p-3 rounded-lg bg-surface-container-low text-body-sm font-body-sm text-secondary border border-surface-container">
-              <strong className="text-on-surface">Foundation v0.2.1 Invariant:</strong> Proceeding creates/selects this contribution context for local specification review. No branches, commits, or PRs will be created on GitHub, and no autonomous AI coding run is started automatically.
+              <strong className="text-on-surface">Foundation v0.3 Invariant:</strong> Starting a contribution creates a local analysis session and routes you to the Repository Intelligence & Issue Analysis workspace. No branches, commits, or PRs will be created on GitHub, and no autonomous AI coding run is started automatically.
             </div>
 
             {/* Modal Actions */}
@@ -1068,14 +1068,32 @@ export const IssuesPage: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   const issue = selectedIssueForGate;
                   setSelectedIssueForGate(null);
-                  navigate(`/issues/${issue.number}?repo=${encodeURIComponent(issue.repository)}`);
+                  try {
+                    const res = await githubService.createContributionSession({
+                      owner: issue.repositoryOwner,
+                      repo: issue.repositoryName,
+                      issueNumber: issue.number,
+                      issueTitle: issue.title,
+                      issueUrl: issue.htmlUrl,
+                      repoAuthorizationStatus: issue.repoAuthorizationStatus,
+                    });
+                    if (res.success && res.session?.id) {
+                      navigate(`/contributions/${res.session.id}`);
+                      return;
+                    }
+                  } catch {
+                    // Fall back to deterministic session ID navigation
+                  }
+                  const safeOwner = issue.repositoryOwner.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+                  const safeRepo = issue.repositoryName.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+                  navigate(`/contributions/contrib-${safeOwner}-${safeRepo}-${issue.number}`);
                 }}
                 className="px-5 py-2 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
               >
-                <span>Proceed to Issue Context</span>
+                <span>Start Contribution Analysis</span>
                 <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
               </button>
             </div>

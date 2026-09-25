@@ -9,6 +9,10 @@ import { verifyGitHubWebhookSignature, processVerifiedWebhook } from './webhookH
 import { getRecentWebhookEvents } from './eventStore';
 import { assignmentSyncService } from './assignmentSyncService';
 import { userAuthStore } from './userAuthStore';
+import { contributionSessionStore } from './contributionSessionStore';
+import { repositoryIntelligenceService } from './repositoryIntelligenceService';
+import { issueAnalysisService } from './issueAnalysisService';
+import type { SanitizedGitHubError } from './types';
 
 export const githubRouter = Router();
 
@@ -533,4 +537,354 @@ githubRouter.post('/user/disconnect', (_req, res) => {
   userAuthStore.clearSession();
   assignmentSyncService.clearCache();
   res.json({ success: true, message: 'User session and assignment cache cleared.' });
+});
+
+/**
+ * ============================================================================
+ * COSInput Foundation v0.3 — Contribution Session & Intelligence Routes
+ * Strictly read-only relative to GitHub.
+ * ============================================================================
+ */
+
+/**
+ * POST /api/github/contributions/session
+ * Creates or retrieves a local contribution analysis session.
+ * Starting a contribution MUST NOT modify GitHub.
+ */
+githubRouter.post(['/contributions/session', '/contributions'], async (req, res) => {
+  try {
+    const { owner, repo, issueNumber, issueTitle, issueUrl, repoAuthorizationStatus } = req.body;
+    if (!owner || !repo || !issueNumber) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'owner, repo, and issueNumber are required to create a contribution session.',
+        },
+      });
+    }
+
+    const userProfile = userAuthStore.getUserProfile();
+    const appStatus = await githubServerClient.getConnectionStatus().catch(() => ({ activeInstallation: null }));
+    const contributorUsername = userProfile?.login || appStatus?.activeInstallation?.accountLogin || 'contributor';
+
+    // Verify if repo is installed
+    let authStatus = repoAuthorizationStatus || 'public_readable';
+    if (!repoAuthorizationStatus) {
+      try {
+        const authorizedRepos = await assignmentSyncService.getAuthorizedRepositories();
+        authStatus = authorizedRepos.has(`${owner}/${repo}`.toLowerCase()) ? 'app_authorized' : 'public_readable';
+      } catch {
+        authStatus = 'public_readable';
+      }
+    }
+
+    const session = contributionSessionStore.createSession({
+      repositoryOwner: owner,
+      repositoryName: repo,
+      issueNumber: Number(issueNumber),
+      issueTitle: issueTitle || `Issue #${issueNumber}`,
+      issueUrl: issueUrl || `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
+      contributorUsername,
+      repositoryAccessStatus: authStatus,
+    });
+
+    res.json({
+      success: true,
+      session,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to create contribution session.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/contributions/:id
+ * Retrieves the full local contribution session state.
+ */
+githubRouter.get('/contributions/:id', (req, res) => {
+  const session = contributionSessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({
+      error: {
+        classification: 'NOT_FOUND',
+        statusCode: 404,
+        message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  res.json({ success: true, session });
+});
+
+/**
+ * POST /api/github/contributions/:id/analyze
+ * Executes Repository Intelligence & Issue Analysis pipeline.
+ * Strictly read-only relative to GitHub.
+ */
+githubRouter.post('/contributions/:id/analyze', async (req, res) => {
+  const session = contributionSessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({
+      error: {
+        classification: 'NOT_FOUND',
+        statusCode: 404,
+        message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  try {
+    // 1. Mark status: REPOSITORY_INSPECTION
+    contributionSessionStore.updateSession(session.id, {
+      analysisStatus: 'REPOSITORY_INSPECTION',
+    });
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Issue Loaded',
+      `Targeted #${session.issueNumber} in ${session.upstreamRepository} for read-only inspection.`
+    );
+
+    // 2. Fetch live issue payload from GitHub
+    const issuePayload = await githubServerClient
+      .getIssue(
+        null,
+        session.repositoryOwner,
+        session.repositoryName,
+        session.issueNumber,
+        userAuthStore.getUserToken() || undefined
+      )
+      .catch((err) => {
+        // If error fetching issue details, return existing session title as body fallback
+        return {
+          title: session.issueTitle,
+          body: '',
+          labels: [],
+        };
+      });
+
+    // 3. Inspect repository
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Repository Inspected',
+      `Scanning repository tree, instruction files (AGENTS.md, CONTRIBUTING.md), and configuration.`
+    );
+
+    const { repositoryIntelligence, dependencyConfig } =
+      await repositoryIntelligenceService.inspectRepository(
+        session.repositoryOwner,
+        session.repositoryName
+      );
+
+    if (repositoryIntelligence.discoveredInstructions.length > 0) {
+      contributionSessionStore.addTimelineEvent(
+        session.id,
+        'Instructions Found',
+        `Discovered ${repositoryIntelligence.discoveredInstructions.length} repository instructions from ${repositoryIntelligence.discoveredInstructionFiles.join(', ')}.`
+      );
+    }
+
+    // 4. Mark status: ISSUE_ANALYSIS
+    contributionSessionStore.updateSession(session.id, {
+      analysisStatus: 'ISSUE_ANALYSIS',
+      repositoryIntelligence,
+      dependenciesAndConfig: dependencyConfig,
+    });
+
+    // 5. Run Issue Analysis & Acceptance Criteria Engine & Blocker Detection
+    const analysisResult = await issueAnalysisService.analyzeIssue({
+      issueNumber: session.issueNumber,
+      issueTitle: issuePayload.title || session.issueTitle,
+      issueBody: issuePayload.body || '',
+      issueLabels: issuePayload.labels || [],
+      repositoryIntelligence,
+      dependencyConfig,
+      repositoryAccessStatus: session.repositoryAccessStatus,
+    });
+
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Acceptance Criteria Generated',
+      `Synthesized ${analysisResult.acceptanceCriteria.length} structured criteria across functional, test, and lint dimensions.`
+    );
+
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Relevant Files Identified',
+      `Identified ${analysisResult.relevantFiles.length} candidate files in repository tree.`
+    );
+
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Plan Generated',
+      `Structured implementation plan ready for human review. Change surface estimated as ${analysisResult.implementationPlan.estimatedChangeSurface}.`
+    );
+
+    const finalStatus = analysisResult.isBlocked ? 'BLOCKED' : 'PLAN_READY';
+
+    if (finalStatus === 'PLAN_READY') {
+      contributionSessionStore.addTimelineEvent(
+        session.id,
+        'Waiting For Approval',
+        'Implementation plan submitted to human contributor for verification before any coding phase.',
+        true,
+        true
+      );
+    }
+
+    const updatedSession = contributionSessionStore.updateSession(session.id, {
+      analysisStatus: finalStatus,
+      issueIntelligence: analysisResult.issueIntelligence,
+      acceptanceCriteria: analysisResult.acceptanceCriteria,
+      relevantFiles: analysisResult.relevantFiles,
+      blockers: analysisResult.blockers,
+      implementationPlan: analysisResult.implementationPlan,
+      errorMessage: undefined,
+    });
+
+    res.json({
+      success: true,
+      session: updatedSession,
+    });
+  } catch (err: any) {
+    const errorMsg = err.message || 'Failed during repository and issue analysis.';
+    contributionSessionStore.updateSession(session.id, {
+      analysisStatus: 'FAILED',
+      errorMessage: errorMsg,
+    });
+    contributionSessionStore.addTimelineEvent(
+      session.id,
+      'Analysis Failed',
+      `Encountered failure: ${errorMsg}`
+    );
+
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'REPOSITORY_ANALYSIS_FAILURE',
+        statusCode: status,
+        message: errorMsg,
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/approve
+ * Human Approval Gate: Approves the plan.
+ * ONLY changes local contribution status to APPROVED.
+ * Zero writes to GitHub.
+ */
+githubRouter.post('/contributions/:id/approve', (req, res) => {
+  const session = contributionSessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({
+      error: {
+        classification: 'NOT_FOUND',
+        statusCode: 404,
+        message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  const now = new Date().toISOString();
+  contributionSessionStore.addTimelineEvent(
+    session.id,
+    'Plan Approved',
+    'Human contributor verified and approved the implementation plan. Implementation has not started.'
+  );
+
+  const updated = contributionSessionStore.updateSession(session.id, {
+    analysisStatus: 'APPROVED',
+    humanApproval: {
+      status: 'approved',
+      approvedAt: now,
+      feedback: req.body?.feedback,
+    },
+  });
+
+  res.json({
+    success: true,
+    session: updated,
+    message: 'Plan approved. Implementation has not started.',
+  });
+});
+
+/**
+ * POST /api/github/contributions/:id/revision
+ * Requests plan revision with contributor feedback.
+ */
+githubRouter.post('/contributions/:id/revision', (req, res) => {
+  const session = contributionSessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({
+      error: {
+        classification: 'NOT_FOUND',
+        statusCode: 404,
+        message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  const feedback = req.body?.feedback || 'Contributor requested revision on plan.';
+  contributionSessionStore.addTimelineEvent(
+    session.id,
+    'Revision Requested',
+    `Feedback: "${feedback}"`
+  );
+
+  const updated = contributionSessionStore.updateSession(session.id, {
+    analysisStatus: 'PLAN_READY',
+    humanApproval: {
+      status: 'revision_requested',
+      feedback,
+    },
+  });
+
+  res.json({
+    success: true,
+    session: updated,
+  });
+});
+
+/**
+ * POST /api/github/contributions/:id/cancel
+ * Cancels the local contribution analysis.
+ */
+githubRouter.post('/contributions/:id/cancel', (req, res) => {
+  const session = contributionSessionStore.getSession(req.params.id);
+  if (!session) {
+    return res.status(404).json({
+      error: {
+        classification: 'NOT_FOUND',
+        statusCode: 404,
+        message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  contributionSessionStore.addTimelineEvent(
+    session.id,
+    'Contribution Cancelled',
+    'Contributor cancelled this contribution session.'
+  );
+
+  const updated = contributionSessionStore.updateSession(session.id, {
+    analysisStatus: 'NOT_STARTED',
+    humanApproval: {
+      status: 'cancelled',
+    },
+  });
+
+  res.json({
+    success: true,
+    session: updated,
+  });
 });

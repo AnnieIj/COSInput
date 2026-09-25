@@ -50,7 +50,22 @@ export interface IGitHubService {
   getDirectoryContents(owner: string, repo: string, path: string, ref?: string): Promise<GitHubDirectoryItem[]>;
   getRepositoryTree(owner: string, repo: string, treeSha: string, recursive?: boolean): Promise<any>;
 
-  // Reserved write methods (Strictly disabled in v0.2 production UI)
+  // v0.3 Contribution Session & Intelligence methods
+  createContributionSession(params: {
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    issueTitle?: string;
+    issueUrl?: string;
+    repoAuthorizationStatus?: string;
+  }): Promise<{ success: boolean; session: any }>;
+  getContributionSession(id: string): Promise<{ success: boolean; session: any }>;
+  runContributionAnalysis(id: string): Promise<{ success: boolean; session: any }>;
+  approveContributionPlan(id: string, feedback?: string): Promise<{ success: boolean; session: any; message: string }>;
+  requestPlanRevision(id: string, feedback: string): Promise<{ success: boolean; session: any }>;
+  cancelContribution(id: string): Promise<{ success: boolean; session: any }>;
+
+  // Reserved write methods (Strictly disabled in v0.2/v0.3 production UI)
   createBranch(owner: string, repo: string, branchName: string, baseSha: string): Promise<{ ref: string; sha: string }>;
   pushCommit(owner: string, repo: string, branch: string, message: string, changes: unknown[]): Promise<{ sha: string }>;
   retriggerWorkflowRun(owner: string, repo: string, runId: number): Promise<{ success: boolean; message: string }>;
@@ -235,7 +250,64 @@ export class RealGitHubService implements IGitHubService {
     );
   }
 
-  // Strictly disabled in active v0.2 UI
+  // v0.3 Contribution Session & Intelligence implementations
+  async createContributionSession(params: {
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    issueTitle?: string;
+    issueUrl?: string;
+    repoAuthorizationStatus?: string;
+  }): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>('/api/github/contributions/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async getContributionSession(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/contributions/${encodeURIComponent(id)}`);
+  }
+
+  async runContributionAnalysis(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/contributions/${encodeURIComponent(id)}/analyze`, {
+      method: 'POST',
+    });
+  }
+
+  async approveContributionPlan(id: string, feedback?: string): Promise<{ success: boolean; session: any; message: string }> {
+    return this.fetchApi<{ success: boolean; session: any; message: string }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      }
+    );
+  }
+
+  async requestPlanRevision(id: string, feedback: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/revision`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      }
+    );
+  }
+
+  async cancelContribution(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/cancel`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  // Strictly disabled in active v0.2/v0.3 UI
   async createBranch(_owner: string, _repo: string, _branchName: string, _baseSha: string): Promise<{ ref: string; sha: string }> {
     throw new Error('Write operations are forbidden in COSInput Foundation v0.2. Read-only foundation active.');
   }

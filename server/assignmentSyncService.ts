@@ -290,6 +290,25 @@ export class AssignmentSyncService {
   clearCache(): void {
     cachedResult = null;
   }
+
+  /**
+   * Retrieves the set of lowercase repository full names authorized via GitHub App installation.
+   */
+  async getAuthorizedRepositories(): Promise<Set<string>> {
+    const authorizedReposSet = new Set<string>();
+    const appStatus = await githubServerClient.getConnectionStatus().catch(() => ({ activeInstallation: null }));
+    if (appStatus.activeInstallation) {
+      try {
+        const repoData = await githubServerClient.listInstallationRepositories(appStatus.activeInstallation.id);
+        for (const r of repoData.repositories) {
+          authorizedReposSet.add(r.fullName.toLowerCase());
+        }
+      } catch {
+        // Continue even if repository listing has an issue
+      }
+    }
+    return authorizedReposSet;
+  }
 }
 
 export const assignmentSyncService = new AssignmentSyncService();

@@ -405,20 +405,38 @@ export class GitHubServerClient {
 
   /**
    * Read-only repository content inspector (single file).
+   * Works for both GitHub App installed repos and public uninstalled repositories.
    */
-  async getFileContent(installationId: number, owner: string, repo: string, path: string, ref?: string) {
-    const token = await getInstallationAccessToken(installationId);
+  async getFileContent(
+    installationId: number | null | undefined,
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    customToken?: string
+  ) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Fall back to unauthenticated public request
+      }
+    }
+
     const url = new URL(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`);
     if (ref) url.searchParams.set('ref', ref);
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'COSInput-Server/0.2',
-      },
-    });
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url.toString(), { headers });
 
     if (!response.ok) {
       const err = await response.text();
@@ -450,20 +468,38 @@ export class GitHubServerClient {
 
   /**
    * Read-only directory listing.
+   * Works for both GitHub App installed repos and public uninstalled repositories.
    */
-  async getDirectoryContents(installationId: number, owner: string, repo: string, path: string, ref?: string) {
-    const token = await getInstallationAccessToken(installationId);
+  async getDirectoryContents(
+    installationId: number | null | undefined,
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    customToken?: string
+  ) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Fall back
+      }
+    }
+
     const url = new URL(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`);
     if (ref) url.searchParams.set('ref', ref);
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'COSInput-Server/0.2',
-      },
-    });
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(url.toString(), { headers });
 
     if (!response.ok) {
       const err = await response.text();
@@ -486,6 +522,111 @@ export class GitHubServerClient {
       size: item.size,
       type: item.type, // 'file' | 'dir'
     }));
+  }
+
+  /**
+   * Read-only repository metadata inspector.
+   */
+  async getRepositoryDetails(
+    installationId: number | null | undefined,
+    owner: string,
+    repo: string,
+    customToken?: string
+  ) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Fall back
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    if (!response.ok) {
+      const err = await response.text();
+      throw classifyGitHubError(response.status, err, response.headers);
+    }
+
+    const data = (await response.json()) as any;
+    return {
+      id: String(data.id),
+      owner: data.owner?.login || owner,
+      name: data.name,
+      fullName: data.full_name,
+      description: data.description || '',
+      isPrivate: Boolean(data.private),
+      defaultBranch: data.default_branch || 'main',
+      openIssuesCount: data.open_issues_count || 0,
+      stars: data.stargazers_count || 0,
+      forks: data.forks_count || 0,
+      updatedAt: data.updated_at,
+      htmlUrl: data.html_url,
+      language: data.language || '',
+      permissions: data.permissions || {},
+    };
+  }
+
+  /**
+   * Retrieves the repository git tree recursively.
+   */
+  async getRepositoryTree(
+    installationId: number | null | undefined,
+    owner: string,
+    repo: string,
+    branch: string = 'main',
+    customToken?: string
+  ) {
+    let token = customToken;
+    if (!token && installationId) {
+      try {
+        token = await getInstallationAccessToken(installationId);
+      } catch {
+        // Fall back
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+      { headers }
+    );
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw classifyGitHubError(response.status, err, response.headers);
+    }
+
+    const data = (await response.json()) as any;
+    const tree = Array.isArray(data.tree) ? data.tree : [];
+    return {
+      sha: data.sha,
+      truncated: Boolean(data.truncated),
+      tree: tree.map((item: any) => ({
+        path: item.path,
+        mode: item.mode,
+        type: item.type as 'blob' | 'tree',
+        sha: item.sha,
+        size: item.size,
+      })),
+    };
   }
 }
 

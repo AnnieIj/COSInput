@@ -262,31 +262,52 @@ export const IssueDetailPage: React.FC = () => {
             <div className="lg:col-span-4 flex flex-col gap-4">
               <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-4">
                 <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-primary text-[20px]">psychology</span>
+                  <span className="material-symbols-outlined text-primary text-[20px]">rocket_launch</span>
                   <h3 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
-                    Autonomous Analysis
+                    Repository Intelligence
                   </h3>
                 </div>
 
                 <div className="p-4 rounded-lg bg-surface-container-low border border-surface-container space-y-2">
-                  <div className="flex items-center gap-1.5 text-secondary font-label-caps text-[10px] font-bold">
-                    <span className="material-symbols-outlined text-[15px]">lock</span>
-                    <span>PHASE 2 FOUNDATION GATE</span>
+                  <div className="flex items-center gap-1.5 text-primary font-label-caps text-[10px] font-bold">
+                    <span className="material-symbols-outlined text-[15px]">insights</span>
+                    <span>FOUNDATION v0.3 ANALYSIS ACTIVE</span>
                   </div>
                   <p className="font-body-sm text-body-sm text-secondary leading-relaxed">
-                    "Repository analysis becomes available after the GitHub read integration is verified."
+                    Inspect repository context, contributor instructions, extract acceptance criteria, and generate a trustworthy implementation plan.
                   </p>
                 </div>
 
-                {/* Explicitly Disabled Action */}
+                {/* Start Contribution Button */}
                 <button
                   type="button"
-                  disabled
-                  className="w-full py-2.5 px-4 rounded-lg bg-surface-container text-outline font-headline-sm text-headline-sm font-semibold cursor-not-allowed border border-surface-container shadow-none flex items-center justify-center gap-2"
-                  title="Repository analysis becomes available after the GitHub read integration is verified."
+                  onClick={async () => {
+                    const repoParts = (realIssue.repository || '').split('/');
+                    const owner = repoParts[0] || 'repository';
+                    const repo = repoParts[1] || 'project';
+                    try {
+                      const res = await githubService.createContributionSession({
+                        owner,
+                        repo,
+                        issueNumber: realIssue.number,
+                        issueTitle: realIssue.title,
+                        issueUrl: realIssue.htmlUrl,
+                      });
+                      if (res.success && res.session?.id) {
+                        navigate(`/contributions/${res.session.id}`);
+                        return;
+                      }
+                    } catch {
+                      // Fall back
+                    }
+                    const safeOwner = owner.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+                    const safeRepo = repo.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+                    navigate(`/contributions/contrib-${safeOwner}-${safeRepo}-${realIssue.number}`);
+                  }}
+                  className="w-full py-2.5 px-4 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-md flex items-center justify-center gap-2 cursor-pointer transition-colors"
                 >
-                  <span className="material-symbols-outlined text-[18px]">lock</span>
-                  <span>Analyze Repository & Issue</span>
+                  <span className="material-symbols-outlined text-[18px]">rocket_launch</span>
+                  <span>Start Contribution Analysis</span>
                 </button>
               </div>
 

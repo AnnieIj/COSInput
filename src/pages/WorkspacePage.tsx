@@ -1,721 +1,1362 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { mockContribution381 } from '../data/mock';
+import { useMode } from '../context/ModeContext';
+import { githubService } from '../services/github.service';
+import type {
+  ContributionSession,
+  AnalysisStatus,
+  RepositoryAccessStatus,
+  AcceptanceCriterion,
+  RelevantFile,
+  BlockerItem,
+  RepositoryInstructionItem,
+  SanitizedGitHubError,
+} from '../services/types';
 
 export const WorkspacePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'overview' | 'plan' | 'code' | 'tests' | 'acceptance' | 'ci' | 'reviews' | 'activity'>('overview');
-  const [copiedBranch, setCopiedBranch] = useState(false);
+  const { isLive } = useMode();
 
-  const contribution = mockContribution381;
+  const [session, setSession] = useState<ContributionSession | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [analyzing, setAnalyzing] = useState<boolean>(false);
+  const [error, setError] = useState<SanitizedGitHubError | null>(null);
 
-  const handleCopyBranch = () => {
-    navigator.clipboard?.writeText(contribution.branch);
-    setCopiedBranch(true);
-    setTimeout(() => setCopiedBranch(false), 2000);
+  // Tab navigation inside workspace
+  const [activeTab, setActiveTab] = useState<
+    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers'
+  >('plan');
+
+  // Human Approval Feedback modal state
+  const [showRevisionModal, setShowRevisionModal] = useState<boolean>(false);
+  const [revisionFeedback, setRevisionFeedback] = useState<string>('');
+  const [approving, setApproving] = useState<boolean>(false);
+
+  // Load contribution session from server
+  const loadSession = useCallback(async () => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (isLive) {
+        const res = await githubService.getContributionSession(id);
+        if (res.success && res.session) {
+          setSession(res.session);
+
+          // If session is newly created (NOT_STARTED), automatically run analysis
+          if (res.session.analysisStatus === 'NOT_STARTED') {
+            runAnalysis(id);
+          }
+        }
+      } else {
+        // Deterministic Demo Session fixture
+        setSession(getDemoSession(id));
+      }
+    } catch (err: any) {
+      // In live mode, if not found on server, try to create from ID params
+      if (isLive && err.statusCode === 404 && id.startsWith('contrib-')) {
+        const parts = id.replace('contrib-', '').split('-');
+        if (parts.length >= 3) {
+          const issueNum = parseInt(parts.pop() || '1', 10);
+          const repo = parts.pop() || 'repo';
+          const owner = parts.join('-');
+          try {
+            const createRes = await githubService.createContributionSession({
+              owner,
+              repo,
+              issueNumber: issueNum,
+            });
+            if (createRes.success && createRes.session) {
+              setSession(createRes.session);
+              runAnalysis(createRes.session.id);
+              return;
+            }
+          } catch {
+            // Fall through to error
+          }
+        }
+      }
+
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'REPOSITORY_ANALYSIS_FAILURE',
+              statusCode: err.statusCode || 500,
+              message: err.message || `Failed to load contribution session '${id}'.`,
+            }
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [id, isLive]);
+
+  // Run analysis pipeline
+  const runAnalysis = async (sessionId: string) => {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      const res = await githubService.runContributionAnalysis(sessionId);
+      if (res.success && res.session) {
+        setSession(res.session);
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'REPOSITORY_ANALYSIS_FAILURE',
+              statusCode: 500,
+              message: err.message || 'Error occurred during repository intelligence analysis.',
+            }
+      );
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSession();
+  }, [loadSession]);
+
+  // Human Approval Action Handlers
+  const handleApprovePlan = async () => {
+    if (!session) return;
+    setApproving(true);
+    try {
+      if (isLive) {
+        const res = await githubService.approveContributionPlan(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      } else {
+        setSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                analysisStatus: 'APPROVED',
+                humanApproval: {
+                  status: 'approved',
+                  approvedAt: new Date().toISOString(),
+                },
+              }
+            : null
+        );
+      }
+    } catch (err: any) {
+      alert(`Approval error: ${err.message || 'Failed to record approval.'}`);
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const handleRequestRevision = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!session || !revisionFeedback.trim()) return;
+
+    try {
+      if (isLive) {
+        const res = await githubService.requestPlanRevision(session.id, revisionFeedback);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      } else {
+        setSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                analysisStatus: 'PLAN_READY',
+                humanApproval: {
+                  status: 'revision_requested',
+                  feedback: revisionFeedback,
+                },
+              }
+            : null
+        );
+      }
+      setShowRevisionModal(false);
+      setRevisionFeedback('');
+    } catch (err: any) {
+      alert(`Revision request error: ${err.message || 'Failed to submit revision feedback.'}`);
+    }
+  };
+
+  const handleCancelContribution = async () => {
+    if (!session) return;
+    if (!confirm('Are you sure you want to cancel this contribution analysis session?')) return;
+
+    try {
+      if (isLive) {
+        const res = await githubService.cancelContribution(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      } else {
+        setSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                analysisStatus: 'NOT_STARTED',
+                humanApproval: { status: 'cancelled' },
+              }
+            : null
+        );
+      }
+    } catch (err: any) {
+      alert(`Cancellation error: ${err.message || 'Failed to cancel session.'}`);
+    }
+  };
+
+  // Render Status Badge
+  const renderStatusBadge = (status: AnalysisStatus) => {
+    switch (status) {
+      case 'NOT_STARTED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-surface-container text-secondary font-code-sm text-[11px] font-semibold border border-surface-container">
+            Not Started
+          </span>
+        );
+      case 'REPOSITORY_INSPECTION':
+      case 'ISSUE_ANALYSIS':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-primary-container text-on-primary font-code-sm text-[11px] font-semibold flex items-center gap-1.5 animate-pulse">
+            <span className="w-1.5 h-1.5 rounded-full bg-on-primary"></span>
+            {status === 'REPOSITORY_INSPECTION' ? 'Inspecting Repository...' : 'Analyzing Issue...'}
+          </span>
+        );
+      case 'PLAN_READY':
+      case 'WAITING_FOR_APPROVAL':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-900 font-code-sm text-[11px] font-bold border border-amber-500/40 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-amber-600 animate-ping"></span>
+            Waiting for Human Approval
+          </span>
+        );
+      case 'APPROVED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-tertiary-container/25 text-tertiary font-code-sm text-[11px] font-bold border border-tertiary/40 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+            Plan Approved (Implementation Idle)
+          </span>
+        );
+      case 'BLOCKED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-error-container text-error font-code-sm text-[11px] font-bold border border-error/40 flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[13px]">block</span>
+            Blocked — Action Required
+          </span>
+        );
+      case 'FAILED':
+        return (
+          <span className="px-2.5 py-0.5 rounded-full bg-error-container text-error font-code-sm text-[11px] font-bold border border-error/40">
+            Analysis Failed
+          </span>
+        );
+      default:
+        return null;
+    }
+  };
+
+  const renderAccessBadge = (access: RepositoryAccessStatus) => {
+    if (access === 'app_authorized') {
+      return (
+        <span className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-tertiary-container/20 text-tertiary border border-tertiary/30 flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+          <span>GitHub App Authorized</span>
+        </span>
+      );
+    }
+    return (
+      <span className="px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold bg-amber-500/15 text-amber-900 border border-amber-500/30 flex items-center gap-1">
+        <span className="material-symbols-outlined text-[12px] text-amber-700">lock</span>
+        <span>Write Access Not Authorized (Public Readable)</span>
+      </span>
+    );
   };
 
   return (
     <div className="flex flex-col w-full min-h-screen bg-surface">
-      {/* Top Workspace Context Header Bar */}
-      <header className="bg-surface-container-lowest px-4 lg:px-6 py-3 border-b border-surface-container shadow-sm">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          {/* Left Metadata & Branch Context */}
-          <div className="flex flex-col gap-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-code-sm text-code-sm text-secondary flex items-center gap-1">
-                <span className="material-symbols-outlined text-[15px] text-primary">terminal</span>
-                {contribution.repository}
+      {/* 1. Top Context Header Bar */}
+      <header className="bg-surface-container-lowest px-4 lg:px-8 py-4 border-b border-surface-container shadow-sm">
+        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <div className="flex items-center gap-2 font-code-sm text-code-sm text-secondary flex-wrap">
+              <button
+                type="button"
+                onClick={() => navigate('/issues')}
+                className="hover:text-primary transition-colors flex items-center gap-1 text-xs"
+              >
+                <span className="material-symbols-outlined text-[14px]">arrow_back</span>
+                <span>Assignments</span>
+              </button>
+              <span>/</span>
+              <span className="font-semibold text-on-surface font-mono">
+                {session?.upstreamRepository || 'Repository'}
               </span>
-              <span className="font-code-sm text-code-sm text-outline-variant">/</span>
-              <span className="font-headline-sm text-headline-sm text-on-surface truncate font-semibold">
-                #{contribution.issueNumber} {contribution.title}
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed font-code-sm text-code-sm font-semibold flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
-                {contribution.stageTag}
+              <span>/</span>
+              <span className="text-primary font-bold font-mono">
+                #{session?.issueNumber || '0'}
               </span>
             </div>
 
-            <div className="flex items-center gap-3 text-secondary font-code-sm text-code-sm flex-wrap">
-              <div className="flex items-center gap-1.5 bg-surface-container px-2 py-0.5 rounded border border-surface-container-high/40">
-                <span className="material-symbols-outlined text-[14px] text-outline">fork_right</span>
-                <span className="text-on-surface font-medium select-all font-mono">{contribution.branch}</span>
-                <button
-                  type="button"
-                  onClick={handleCopyBranch}
-                  className="hover:text-primary transition-colors flex items-center"
-                  title="Copy branch name"
-                >
-                  <span className="material-symbols-outlined text-[13px]">
-                    {copiedBranch ? 'check' : 'content_copy'}
-                  </span>
-                </button>
-              </div>
-              <span className="text-outline-variant">•</span>
-              <div className="flex items-center gap-1">
-                <span className="text-outline">Commit:</span>
-                <span className="bg-surface-container-low px-1.5 py-0.5 rounded text-on-surface font-semibold font-mono">
-                  {contribution.commitSha}
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h1 className="font-headline-md text-headline-md text-on-surface font-bold truncate">
+                {session?.issueTitle || 'Contribution Analysis Workspace'}
+              </h1>
+              {session && renderStatusBadge(session.analysisStatus)}
+              {session && renderAccessBadge(session.repositoryAccessStatus)}
+            </div>
+
+            <div className="flex items-center gap-3 text-secondary font-code-sm text-[11px] flex-wrap">
+              <span>Session ID: <code className="font-mono text-on-surface bg-surface-container px-1 rounded">{session?.id || id}</code></span>
+              <span>•</span>
+              <span>Contributor: <strong>@{session?.contributorUsername || 'you'}</strong></span>
+              <span>•</span>
+              <a
+                href={session?.issueUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline flex items-center gap-0.5"
+              >
+                <span>View on GitHub</span>
+                <span className="material-symbols-outlined text-[13px]">open_in_new</span>
+              </a>
+            </div>
+          </div>
+
+          {/* Global Header Actions */}
+          <div className="flex items-center gap-2.5 self-start lg:self-center shrink-0 flex-wrap">
+            {session && (
+              <button
+                type="button"
+                disabled={analyzing}
+                onClick={() => runAnalysis(session.id)}
+                className="px-3.5 py-1.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold border border-surface-container shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                title="Rerun read-only repository inspection and issue intelligence"
+              >
+                <span className={`material-symbols-outlined text-[16px] ${analyzing ? 'animate-spin' : ''}`}>
+                  refresh
                 </span>
-              </div>
-              <span className="text-outline-variant">•</span>
-              <span className="text-secondary flex items-center gap-1">
-                <span className="material-symbols-outlined text-[14px] text-tertiary">history</span>
-                Updated {contribution.updatedAgo}
-              </span>
-            </div>
-          </div>
+                <span>{analyzing ? 'Inspecting...' : 'Re-analyze'}</span>
+              </button>
+            )}
 
-          {/* Right Action Bar & Global Controls */}
-          <div className="flex items-center gap-2 self-start lg:self-center shrink-0">
             <button
               type="button"
-              onClick={() => alert(`Run trace share link copied: /contributions/${id || '381'}`)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors font-label-md text-label-md border border-surface-container"
+              onClick={() => navigate('/issues')}
+              className="px-3.5 py-1.5 rounded-lg bg-surface-container-low hover:bg-surface-container text-secondary hover:text-on-surface font-label-md text-label-md font-medium border border-surface-container transition-colors"
             >
-              <span className="material-symbols-outlined text-[16px]">share</span>
-              <span>Share Run</span>
+              Back to Issues
             </button>
-            <button
-              type="button"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-container text-secondary hover:text-on-surface transition-colors font-label-md text-label-md border border-surface-container"
-            >
-              <span className="material-symbols-outlined text-[16px]">pause_circle</span>
-              <span>Pause</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/contributions/${id || '381'}/ci`)}
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-container transition-all shadow-sm font-label-md text-label-md font-semibold"
-            >
-              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-              <span>Review & Run Tests</span>
-              <kbd className="ml-1 px-1.5 py-0.2 rounded bg-surface-container-lowest/20 font-code-sm text-code-sm text-on-primary">
-                ⌘R
-              </kbd>
-            </button>
-          </div>
-        </div>
-
-        {/* 9-Step Pipeline Stepper */}
-        <div className="mt-4 pt-2 overflow-x-auto scrollbar-none border-t border-surface-container-low">
-          <div className="flex items-center min-w-[780px] justify-between pb-1">
-            {contribution.steps.map((step, idx) => {
-              const isCompleted = step.status === 'completed';
-              const isActive = step.status === 'active';
-
-              return (
-                <React.Fragment key={step.number}>
-                  {idx > 0 && (
-                    <div
-                      className={`flex-1 h-0.5 mx-2 ${
-                        isCompleted
-                          ? 'bg-tertiary'
-                          : isActive
-                          ? 'bg-primary'
-                          : 'bg-surface-container-high'
-                      }`}
-                    />
-                  )}
-
-                  <div className={`flex items-center gap-2 ${!isCompleted && !isActive ? 'opacity-50' : ''}`}>
-                    {isCompleted ? (
-                      <div className="w-6 h-6 rounded-full bg-tertiary-fixed text-on-tertiary-fixed flex items-center justify-center shadow-sm">
-                        <span className="material-symbols-outlined text-[14px]">check</span>
-                      </div>
-                    ) : isActive ? (
-                      <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center text-on-primary shadow-md relative">
-                        <span className="w-2 h-2 rounded-full bg-on-primary animate-ping"></span>
-                      </div>
-                    ) : (
-                      <div className="w-6 h-6 rounded-full bg-surface-container flex items-center justify-center text-outline">
-                        <span className="font-code-sm text-[10px]">{step.number}</span>
-                      </div>
-                    )}
-
-                    <div className="flex flex-col">
-                      <span
-                        className={`font-label-caps text-[10px] ${
-                          isActive ? 'text-primary font-bold' : isCompleted ? 'text-on-surface font-semibold' : 'text-secondary'
-                        }`}
-                      >
-                        {step.number}. {step.name}
-                      </span>
-                      {step.subtext && (
-                        <span className="font-code-sm text-[9px] text-primary">{step.subtext}</span>
-                      )}
-                    </div>
-                  </div>
-                </React.Fragment>
-              );
-            })}
           </div>
         </div>
       </header>
 
-      {/* Workspace Subnavigation Tabs */}
-      <nav className="bg-surface-container-low px-4 lg:px-6 flex items-center gap-1 overflow-x-auto border-b border-surface-container">
-        <button
-          type="button"
-          onClick={() => setActiveTab('overview')}
-          className={`px-3 py-2 font-label-md text-label-md flex items-center gap-1.5 transition-colors border-b-2 ${
-            activeTab === 'overview'
-              ? 'text-primary bg-surface-container-lowest border-primary shadow-sm font-semibold'
-              : 'text-secondary hover:text-on-surface border-transparent'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[16px]">view_quilt</span>
-          <span>Overview</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('plan')}
-          className={`px-3 py-2 font-label-md text-label-md flex items-center gap-1.5 transition-colors border-b-2 ${
-            activeTab === 'plan'
-              ? 'text-primary bg-surface-container-lowest border-primary shadow-sm font-semibold'
-              : 'text-secondary hover:text-on-surface border-transparent'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[16px]">account_tree</span>
-          <span>Plan</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('code')}
-          className={`px-3 py-2 font-label-md text-label-md flex items-center gap-1.5 transition-colors border-b-2 ${
-            activeTab === 'code'
-              ? 'text-primary bg-surface-container-lowest border-primary shadow-sm font-semibold'
-              : 'text-secondary hover:text-on-surface border-transparent'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[16px]">code</span>
-          <span>Code</span>
-          <span className="px-1.5 py-0.2 rounded-full bg-surface-container font-code-sm text-[10px] text-on-surface">
-            3 (+124 -18)
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate(`/contributions/${id || '381'}/ci`)}
-          className="px-3 py-2 font-label-md text-label-md text-secondary hover:text-on-surface transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px]">task_alt</span>
-          <span>Tests</span>
-          <span className="px-1.5 py-0.2 rounded-full bg-error-container text-on-error-container font-code-sm text-[10px] font-semibold">
-            1 Failed, 2 Passed
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('acceptance')}
-          className={`px-3 py-2 font-label-md text-label-md flex items-center gap-1.5 transition-colors border-b-2 ${
-            activeTab === 'acceptance'
-              ? 'text-primary bg-surface-container-lowest border-primary shadow-sm font-semibold'
-              : 'text-secondary hover:text-on-surface border-transparent'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[16px]">verified</span>
-          <span>Acceptance</span>
-          <span className="px-1.5 py-0.2 rounded-full bg-secondary-fixed text-on-secondary-fixed font-code-sm text-[10px] font-semibold">
-            4/5 Verified
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate(`/contributions/${id || '381'}/ci`)}
-          className="px-3 py-2 font-label-md text-label-md text-secondary hover:text-on-surface transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px]">integration_instructions</span>
-          <span>CI</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate(`/contributions/${id || '381'}/guardian`)}
-          className="px-3 py-2 font-label-md text-label-md text-secondary hover:text-on-surface transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px]">verified_user</span>
-          <span>Guardian</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate(`/contributions/${id || '381'}/conflicts`)}
-          className="px-3 py-2 font-label-md text-label-md text-secondary hover:text-on-surface transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px]">call_merge</span>
-          <span>Conflicts</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => navigate(`/contributions/${id || '381'}/reviews`)}
-          className="px-3 py-2 font-label-md text-label-md text-secondary hover:text-on-surface transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-[16px]">rate_review</span>
-          <span>Reviews</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('activity')}
-          className={`px-3 py-2 font-label-md text-label-md flex items-center gap-1.5 transition-colors border-b-2 ${
-            activeTab === 'activity'
-              ? 'text-primary bg-surface-container-lowest border-primary shadow-sm font-semibold'
-              : 'text-secondary hover:text-on-surface border-transparent'
-          }`}
-        >
-          <span className="material-symbols-outlined text-[16px]">history_toggle_off</span>
-          <span>Activity</span>
-        </button>
-      </nav>
+      {/* 2. Error Diagnostic Box */}
+      {error && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-error-container/20 border border-error/40 flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="material-symbols-outlined text-error text-[22px] mt-0.5 shrink-0">error</span>
+              <div className="flex flex-col gap-1">
+                <span className="font-headline-sm text-headline-sm text-error font-bold">
+                  {error.classification} {error.statusCode > 0 ? `(Status ${error.statusCode})` : ''}
+                </span>
+                <p className="font-body-md text-body-md text-on-surface">{error.message}</p>
+                <span className="font-code-sm text-[11px] text-secondary">
+                  Strict Rule: COSInput will not fake analysis or fall back to mock data.
+                </span>
+              </div>
+            </div>
+            {session && (
+              <button
+                type="button"
+                onClick={() => runAnalysis(session.id)}
+                className="px-3 py-1.5 rounded-lg bg-error text-on-error font-label-md text-label-md font-semibold shrink-0 cursor-pointer"
+              >
+                Retry Analysis
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
-      {/* Main View Grid Content */}
-      <div className="px-4 lg:px-6 py-6 grid grid-cols-1 xl:grid-cols-12 gap-6">
-        {/* LEFT 2/3 COLUMN: Blocker, Spec, Plan, Files */}
-        <div className="xl:col-span-8 flex flex-col gap-6">
-          {/* 1. HIGH-PRIORITY SAFETY BLOCKER BANNER */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-md relative overflow-hidden">
-            <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-error"></div>
-            <div className="flex flex-col gap-3 pl-1">
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-error-container text-on-error-container flex items-center justify-center shrink-0">
-                    <span className="material-symbols-outlined text-[20px]">warning</span>
-                  </span>
-                  <div>
-                    <h3 className="font-headline-sm text-headline-sm text-on-surface flex items-center gap-2 font-bold">
-                      {contribution.safetyBlocker.title}
-                      <span className="px-2 py-0.5 rounded bg-error-container text-on-error-container font-code-sm text-[10px] font-bold uppercase tracking-wider">
-                        {contribution.safetyBlocker.status}
-                      </span>
-                    </h3>
-                    <p className="font-body-sm text-body-sm text-secondary mt-0.5">
-                      Affects: <code className="font-code-sm text-code-sm bg-surface-container px-1 py-0.5 rounded text-on-surface">{contribution.safetyBlocker.affectedFile}</code> & production staking execution.
+      {/* 3. Human Approval Gate Banner (Requirement 10 & 16) */}
+      {session && session.analysisStatus === 'APPROVED' && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-tertiary-container/15 border border-tertiary/30 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-tertiary text-on-tertiary flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">check</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="font-headline-sm text-headline-sm font-bold text-tertiary">
+                  Plan Approved. Implementation has not started.
+                </span>
+                <span className="font-body-sm text-body-sm text-secondary">
+                  Human verification completed. In accordance with Foundation v0.3 invariants, zero write operations, branches, or autonomous coding runs were executed.
+                </span>
+              </div>
+            </div>
+            <span className="font-code-sm text-[11px] bg-tertiary-fixed text-on-tertiary-fixed px-3 py-1 rounded font-semibold uppercase">
+              Ready for v0.4 Runner
+            </span>
+          </div>
+        </div>
+      )}
+
+      {session && session.analysisStatus === 'PLAN_READY' && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-primary-fixed/30 border border-primary/25 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-primary-container text-on-primary flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">fact_check</span>
+              </div>
+              <div>
+                <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                  Implementation Plan Ready for Human Approval
+                </span>
+                <span className="font-body-sm text-body-sm text-secondary">
+                  Review the proposed changes, acceptance criteria, and relevant files below. Approving confirms the specification without modifying code.
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setShowRevisionModal(true)}
+                className="px-3.5 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold border border-surface-container transition-colors cursor-pointer"
+              >
+                Request Plan Revision
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCancelContribution}
+                className="px-3.5 py-2 rounded-lg bg-surface-container-low hover:bg-error-container/20 text-secondary hover:text-error font-label-md text-label-md font-medium border border-surface-container transition-colors"
+              >
+                Cancel Contribution
+              </button>
+
+              <button
+                type="button"
+                disabled={approving}
+                onClick={handleApprovePlan}
+                className="px-5 py-2 rounded-lg bg-tertiary-container text-on-tertiary hover:opacity-90 font-headline-sm text-headline-sm font-semibold shadow-md flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+              >
+                <span className="material-symbols-outlined text-[18px]">verified</span>
+                <span>{approving ? 'Approving...' : 'Approve Plan'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Main Body: Split Layout (Main Content + Right Side Panel) */}
+      <main className="max-w-7xl mx-auto w-full px-4 lg:px-8 py-6 flex-1">
+        {loading && (
+          <div className="space-y-4 animate-pulse">
+            <div className="h-10 bg-surface-container rounded-xl w-1/3"></div>
+            <div className="h-64 bg-surface-container-low rounded-xl"></div>
+          </div>
+        )}
+
+        {!loading && session && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left / Main Workspace Section (Cols 8) */}
+            <div className="lg:col-span-8 flex flex-col gap-5">
+              {/* Tab Navigation */}
+              <div className="bg-surface-container-lowest p-1.5 rounded-xl border border-surface-container shadow-sm flex items-center gap-1 overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('plan')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'plan'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">assignment</span>
+                  <span>Implementation Plan</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('issue')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'issue'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">psychology</span>
+                  <span>Issue Understanding</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('criteria')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'criteria'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">checklist</span>
+                  <span>Acceptance Criteria ({session.acceptanceCriteria.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('files')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'files'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">folder_open</span>
+                  <span>Relevant Files ({session.relevantFiles.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('instructions')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'instructions'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">menu_book</span>
+                  <span>Repo Instructions</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('deps')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'deps'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">settings_input_component</span>
+                  <span>Deps & Config</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('blockers')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'blockers'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">warning</span>
+                  <span>Risks & Blockers ({session.blockers.length})</span>
+                </button>
+              </div>
+
+              {/* Tab 1: Implementation Plan */}
+              {activeTab === 'plan' && (
+                <div className="space-y-5">
+                  {session.implementationPlan ? (
+                    <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+                      <div className="flex items-center justify-between border-b border-surface-container-low pb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="material-symbols-outlined text-primary text-[22px]">assignment</span>
+                          <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                            Proposed Implementation Plan
+                          </h2>
+                        </div>
+                        <span className="px-3 py-1 rounded font-code-sm text-[11px] font-bold uppercase bg-surface-container text-on-surface">
+                          Change Surface: {session.implementationPlan.estimatedChangeSurface}
+                        </span>
+                      </div>
+
+                      {/* Issue & Repo Understanding */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-1.5">
+                          <span className="font-label-caps text-[10px] uppercase text-secondary font-bold">
+                            Issue Target
+                          </span>
+                          <p className="font-body-md text-body-md text-on-surface font-semibold">
+                            {session.implementationPlan.issueSummary}
+                          </p>
+                        </div>
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-1.5">
+                          <span className="font-label-caps text-[10px] uppercase text-secondary font-bold">
+                            Repository Context
+                          </span>
+                          <p className="font-body-md text-body-md text-secondary">
+                            {session.implementationPlan.repositoryUnderstanding}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Proposed Changes list (mapped to ACs) */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h3 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
+                            Proposed Code & Structural Changes
+                          </h3>
+                          <span className="font-code-sm text-code-sm text-secondary">
+                            {session.implementationPlan.proposedChanges.length} targets mapped to ACs
+                          </span>
+                        </div>
+
+                        <div className="divide-y divide-surface-container-low border border-surface-container rounded-xl overflow-hidden">
+                          {session.implementationPlan.proposedChanges.map((change) => (
+                            <div key={change.id} className="p-4 bg-surface-container-lowest hover:bg-surface-container-low/40 transition-colors flex flex-col gap-2">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <span className="font-code-sm text-code-sm font-mono font-bold text-primary">
+                                  {change.targetFile}
+                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  {change.mappedAcceptanceCriteriaIds.map((acId) => (
+                                    <span key={acId} className="px-2 py-0.5 rounded bg-primary-fixed text-on-primary-fixed font-code-sm text-[10px] font-bold">
+                                      Maps to {acId}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                              <p className="font-body-md text-body-md text-secondary">
+                                {change.description}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Verification: Tests & Build/Lint */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                          <div className="flex items-center gap-1.5 font-headline-sm text-headline-sm font-semibold text-on-surface">
+                            <span className="material-symbols-outlined text-primary text-[18px]">biotech</span>
+                            <span>Tests To Run</span>
+                          </div>
+                          <ul className="space-y-1.5 font-code-sm text-code-sm text-secondary">
+                            {session.implementationPlan.testsToRun.map((t, idx) => (
+                              <li key={idx} className="flex items-center gap-2">
+                                <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                <span>{t}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                          <div className="flex items-center gap-1.5 font-headline-sm text-headline-sm font-semibold text-on-surface">
+                            <span className="material-symbols-outlined text-primary text-[18px]">verified</span>
+                            <span>Build / Lint Checks</span>
+                          </div>
+                          <ul className="space-y-1.5 font-code-sm text-code-sm text-secondary">
+                            {session.implementationPlan.buildLintVerification.map((b, idx) => (
+                              <li key={idx} className="flex items-center gap-2">
+                                <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                                <span>{b}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+
+                      {/* Out of Scope & Risks */}
+                      <div className="space-y-3 pt-2 border-t border-surface-container-low">
+                        <h4 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
+                          Strictly Out of Scope
+                        </h4>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {session.implementationPlan.outOfScopeItems.map((item, idx) => (
+                            <span key={idx} className="px-3 py-1 rounded-lg bg-surface-container text-secondary font-code-sm text-code-sm">
+                              ✕ {item}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-8 rounded-xl bg-surface-container-lowest border border-surface-container text-center space-y-3">
+                      <span className="material-symbols-outlined text-[40px] text-outline">pending_actions</span>
+                      <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">Plan Not Generated Yet</h3>
+                      <p className="font-body-md text-body-md text-secondary max-w-md mx-auto">
+                        Repository inspection and issue analysis have not run for this contribution session.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => runAnalysis(session.id)}
+                        className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold"
+                      >
+                        Run Repository & Issue Analysis
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 2: Issue Understanding */}
+              {activeTab === 'issue' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+                  <div className="border-b border-surface-container-low pb-3">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      Issue Intelligence & Requirements Separation
+                    </h2>
+                    <p className="font-body-sm text-body-sm text-secondary">
+                      Strict separation of explicit maintainer requirements from inferred context and unknown questions.
                     </p>
                   </div>
+
+                  {session.issueIntelligence ? (
+                    <div className="space-y-5">
+                      {/* Explicit Requirements */}
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold bg-tertiary-fixed text-on-tertiary-fixed">
+                            EXPLICIT REQUIREMENTS
+                          </span>
+                          <span className="font-code-sm text-code-sm text-secondary">
+                            Directly specified by maintainer or issue author
+                          </span>
+                        </div>
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                          {session.issueIntelligence.explicitRequirements.map((req, idx) => (
+                            <div key={idx} className="flex items-start gap-2.5 text-on-surface font-body-md text-body-md">
+                              <span className="material-symbols-outlined text-primary text-[18px] mt-0.5 shrink-0">check_circle</span>
+                              <span>{req}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Inferred Requirements */}
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold bg-primary-fixed text-on-primary-fixed">
+                            INFERRED REQUIREMENTS
+                          </span>
+                          <span className="font-code-sm text-code-sm text-secondary">
+                            Derived from repository architecture and toolchain
+                          </span>
+                        </div>
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                          {session.issueIntelligence.inferredRequirements.map((req, idx) => (
+                            <div key={idx} className="flex items-start gap-2.5 text-secondary font-body-md text-body-md">
+                              <span className="material-symbols-outlined text-outline text-[18px] mt-0.5 shrink-0">info</span>
+                              <span>{req}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Unknowns / Questions */}
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold bg-amber-500/20 text-amber-900 border border-amber-500/30">
+                            UNKNOWN / NEEDS CONFIRMATION
+                          </span>
+                          <span className="font-code-sm text-code-sm text-secondary">
+                            Must not be invented by AI assumptions
+                          </span>
+                        </div>
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container">
+                          {session.issueIntelligence.unknownsAndQuestions.length > 0 ? (
+                            session.issueIntelligence.unknownsAndQuestions.map((q, idx) => (
+                              <div key={idx} className="flex items-start gap-2 text-amber-900 font-body-md text-body-md">
+                                <span className="material-symbols-outlined text-amber-700 text-[18px] mt-0.5 shrink-0">help</span>
+                                <span>{q}</span>
+                              </div>
+                            ))
+                          ) : (
+                            <span className="font-code-sm text-code-sm text-secondary">
+                              No unresolved specification ambiguities identified.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-secondary font-body-md">Issue intelligence pending analysis.</p>
+                  )}
                 </div>
-                <span className="font-code-sm text-code-sm text-secondary bg-surface-container px-2.5 py-1 rounded">
-                  {contribution.safetyBlocker.ruleText}
-                </span>
+              )}
+
+              {/* Tab 3: Acceptance Criteria */}
+              {activeTab === 'criteria' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-4">
+                  <div className="flex items-center justify-between border-b border-surface-container-low pb-3">
+                    <div>
+                      <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                        Acceptance Criteria Engine
+                      </h2>
+                      <p className="font-body-sm text-body-sm text-secondary">
+                        Structured, verifiable criteria derived from issue, documentation, and existing tests.
+                      </p>
+                    </div>
+                    <span className="px-3 py-1 rounded bg-surface-container font-code-sm text-code-sm font-bold text-primary">
+                      {session.acceptanceCriteria.length} Criteria
+                    </span>
+                  </div>
+
+                  <div className="space-y-3">
+                    {session.acceptanceCriteria.map((ac) => (
+                      <div key={ac.id} className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <span className="font-code-sm text-code-sm font-mono font-bold text-primary bg-primary-fixed/40 px-2 py-0.5 rounded">
+                              {ac.id}
+                            </span>
+                            <span className="px-2 py-0.5 rounded font-label-caps text-[10px] font-bold bg-surface-container text-secondary">
+                              {ac.type}
+                            </span>
+                            <span className="font-code-sm text-[11px] text-secondary">
+                              Source: <strong>{ac.source}</strong>
+                            </span>
+                          </div>
+                          <span className={`px-2 py-0.5 rounded font-code-sm text-[10px] font-bold ${
+                            ac.confidence === 'HIGH' ? 'bg-tertiary-fixed text-on-tertiary-fixed' : 'bg-amber-500/20 text-amber-900'
+                          }`}>
+                            {ac.confidence} Confidence
+                          </span>
+                        </div>
+
+                        <p className="font-body-md text-body-md text-on-surface font-medium pl-1">
+                          {ac.description}
+                        </p>
+
+                        <div className="pt-2 border-t border-surface-container text-code-sm font-code-sm text-secondary flex items-start gap-1.5 pl-1">
+                          <span className="font-semibold text-on-surface shrink-0">Verification:</span>
+                          <span>{ac.verificationStrategy}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 4: Relevant Files */}
+              {activeTab === 'files' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-4">
+                  <div className="border-b border-surface-container-low pb-3">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      Relevant Files Discovery
+                    </h2>
+                    <p className="font-body-sm text-body-sm text-secondary">
+                      Classified against repository tree with confidence ratings and modification likelihood.
+                    </p>
+                  </div>
+
+                  <div className="divide-y divide-surface-container-low border border-surface-container rounded-xl overflow-hidden">
+                    {session.relevantFiles.map((file) => (
+                      <div key={file.path} className="p-4 bg-surface-container-lowest hover:bg-surface-container-low/40 transition-colors flex flex-col gap-1.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-code-sm text-code-sm font-mono font-bold text-on-surface">
+                            {file.path}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="px-2 py-0.5 rounded bg-surface-container font-label-caps text-[10px] font-bold text-secondary">
+                              {file.category}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold ${
+                              file.modificationLikely ? 'bg-primary-fixed text-on-primary-fixed' : 'bg-surface-container text-secondary'
+                            }`}>
+                              {file.modificationLikely ? 'Modification Likely' : 'Read-Only Reference'}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="font-body-sm text-body-sm text-secondary">
+                          {file.reason}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Tab 5: Repository Instructions */}
+              {activeTab === 'instructions' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-4">
+                  <div className="border-b border-surface-container-low pb-3">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      Discovered Contributor Instructions
+                    </h2>
+                    <p className="font-body-sm text-body-sm text-secondary">
+                      Extracted from AGENTS.md, CONTRIBUTING.md, and configuration manifests. COSInput never invents rules.
+                    </p>
+                  </div>
+
+                  {session.repositoryIntelligence?.discoveredInstructions && session.repositoryIntelligence.discoveredInstructions.length > 0 ? (
+                    <div className="space-y-3">
+                      {session.repositoryIntelligence.discoveredInstructions.map((inst, idx) => (
+                        <div key={idx} className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                              {inst.title}
+                            </h3>
+                            <span className="px-2 py-0.5 rounded font-code-sm text-[10px] font-mono bg-surface-container text-secondary">
+                              Source: {inst.sourceFile}
+                            </span>
+                          </div>
+                          <p className="font-code-sm text-code-sm text-secondary whitespace-pre-wrap">
+                            {inst.details}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-secondary font-body-md">
+                      No explicit AGENTS.md or CONTRIBUTING.md files detected in repository tree.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 6: Dependencies & Config */}
+              {activeTab === 'deps' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+                  <div className="border-b border-surface-container-low pb-3">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      Dependencies & External Configuration
+                    </h2>
+                    <p className="font-body-sm text-body-sm text-secondary">
+                      Detected runtime toolchain and external environment dependencies.
+                    </p>
+                  </div>
+
+                  {session.dependenciesAndConfig && (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="p-3 rounded-lg bg-surface-container-low border border-surface-container">
+                          <span className="text-secondary font-code-sm text-[11px] block">Language</span>
+                          <span className="font-bold text-on-surface font-mono">{session.dependenciesAndConfig.language}</span>
+                        </div>
+                        <div className="p-3 rounded-lg bg-surface-container-low border border-surface-container">
+                          <span className="text-secondary font-code-sm text-[11px] block">Framework</span>
+                          <span className="font-bold text-primary font-mono">{session.dependenciesAndConfig.framework}</span>
+                        </div>
+                        <div className="p-3 rounded-lg bg-surface-container-low border border-surface-container">
+                          <span className="text-secondary font-code-sm text-[11px] block">Package Manager</span>
+                          <span className="font-bold text-on-surface font-mono">{session.dependenciesAndConfig.packageManager}</span>
+                        </div>
+                        <div className="p-3 rounded-lg bg-surface-container-low border border-surface-container">
+                          <span className="text-secondary font-code-sm text-[11px] block">Test Tooling</span>
+                          <span className="font-bold text-tertiary font-mono">{session.dependenciesAndConfig.testFramework}</span>
+                        </div>
+                      </div>
+
+                      {session.dependenciesAndConfig.externalConfiguration.length > 0 && (
+                        <div className="space-y-2 pt-2">
+                          <h3 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
+                            Required External Configuration (.env.example)
+                          </h3>
+                          <div className="divide-y divide-surface-container border border-surface-container rounded-xl overflow-hidden">
+                            {session.dependenciesAndConfig.externalConfiguration.map((cfg, idx) => (
+                              <div key={idx} className="p-3 bg-surface-container-lowest flex items-center justify-between">
+                                <code className="font-mono text-code-sm text-primary font-bold">{cfg.name}</code>
+                                <span className="px-2 py-0.5 rounded font-code-sm text-[10px] bg-surface-container text-secondary uppercase">
+                                  {cfg.category}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 7: Risks & Blockers */}
+              {activeTab === 'blockers' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-4">
+                  <div className="border-b border-surface-container-low pb-3">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      Blocker Detection & Risk Analysis
+                    </h2>
+                    <p className="font-body-sm text-body-sm text-secondary">
+                      Pre-implementation blockers must be resolved before any code modifications occur.
+                    </p>
+                  </div>
+
+                  {session.blockers.length > 0 ? (
+                    <div className="space-y-3">
+                      {session.blockers.map((b) => (
+                        <div key={b.id} className="p-4 rounded-xl bg-error-container/15 border border-error/30 space-y-2">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold bg-error text-on-error">
+                              {b.category}
+                            </span>
+                          </div>
+                          <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                            {b.description}
+                          </h3>
+                          <p className="font-body-sm text-body-sm text-secondary">
+                            <strong>Impact:</strong> {b.impact}
+                          </p>
+                          <div className="p-2.5 rounded-lg bg-surface-container-low font-code-sm text-code-sm text-on-surface border border-surface-container">
+                            <strong>Action:</strong> {b.recommendedNextAction}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-tertiary-container/15 text-tertiary border border-tertiary/30 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[20px]">check_circle</span>
+                      <span className="font-headline-sm text-headline-sm font-semibold">Zero Blockers Detected</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Right Side Panel: Repository Intelligence & Timeline (Cols 4) */}
+            <div className="lg:col-span-4 flex flex-col gap-5">
+              {/* Repository Intelligence Card */}
+              <div className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm space-y-4">
+                <div className="flex items-center gap-2 border-b border-surface-container-low pb-3">
+                  <span className="material-symbols-outlined text-primary text-[20px]">source</span>
+                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    Repository Intelligence
+                  </h3>
+                </div>
+
+                <div className="space-y-2.5 font-code-sm text-code-sm">
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Language:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.dependenciesAndConfig?.language || session.repositoryIntelligence?.sampleTreeFiles ? 'TypeScript' : 'Detecting...'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Framework:</span>
+                    <span className="font-semibold text-primary font-mono">
+                      {session.dependenciesAndConfig?.framework || 'React'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Package Manager:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.dependenciesAndConfig?.packageManager || 'npm'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Default Branch:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.repositoryIntelligence?.defaultBranch || 'main'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Test Tooling:</span>
+                    <span className="font-semibold text-tertiary font-mono">
+                      {session.dependenciesAndConfig?.testFramework || 'Vitest'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">CI System:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.dependenciesAndConfig?.ciSystem || 'GitHub Actions'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">App Authorization:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.repositoryAccessStatus === 'app_authorized' ? 'Authorized' : 'Public Only'}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between p-2 rounded bg-surface-container-low">
+                    <span className="text-secondary">Files Indexed:</span>
+                    <span className="font-semibold text-on-surface font-mono">
+                      {session.repositoryIntelligence?.totalTreeFilesCount || 0} files
+                    </span>
+                  </div>
+                </div>
               </div>
 
-              <div className="bg-surface-container-low p-3 rounded-lg text-on-surface font-body-sm text-body-sm leading-relaxed border border-error/20">
-                <span className="font-semibold text-error">COSInput Safety Invariant:</span> {contribution.safetyBlocker.invariantMessage}
-              </div>
+              {/* Activity Timeline Card (Requirement 11) */}
+              <div className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm space-y-4">
+                <div className="flex items-center gap-2 border-b border-surface-container-low pb-3">
+                  <span className="material-symbols-outlined text-primary text-[20px]">history</span>
+                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    Activity Timeline
+                  </h3>
+                </div>
 
-              <div className="flex items-center gap-2 flex-wrap pt-1">
-                <button
-                  type="button"
-                  onClick={() => alert("Drafting question to repository maintainer regarding canonical contract deployment address.")}
-                  className="px-3.5 py-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-container font-label-md text-label-md flex items-center gap-1.5 shadow-sm transition-colors font-medium"
-                >
-                  <span className="material-symbols-outlined text-[16px]">contact_support</span>
-                  <span>Draft Maintainer Question</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => alert("Continuing isolated unblocked work on form UI validation and error boundaries.")}
-                  className="px-3.5 py-1.5 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high font-label-md text-label-md flex items-center gap-1.5 transition-colors border border-surface-container font-medium"
-                >
-                  <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
-                  <span>Continue Unblocked Work (Form UI & Validation)</span>
-                </button>
-                <button
-                  type="button"
-                  className="px-3.5 py-1.5 rounded-lg bg-surface-container text-secondary hover:text-error font-label-md text-label-md flex items-center gap-1.5 transition-colors border border-surface-container font-medium"
-                >
-                  <span className="material-symbols-outlined text-[16px]">pause_circle</span>
-                  <span>Pause Contribution</span>
-                </button>
+                <div className="space-y-4 relative pl-3 before:absolute before:left-[17px] before:top-2 before:bottom-2 before:w-0.5 before:bg-surface-container">
+                  {session.activityTimeline.map((item, idx) => (
+                    <div key={item.id || idx} className="flex items-start gap-3 relative">
+                      <div className={`w-3 h-3 rounded-full mt-1.5 shrink-0 z-10 ${
+                        item.completed ? 'bg-tertiary ring-2 ring-surface' : item.active ? 'bg-primary ring-2 ring-surface animate-ping' : 'bg-outline'
+                      }`} />
+                      <div className="flex flex-col min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-headline-sm text-sm font-bold text-on-surface truncate">
+                            {item.stage}
+                          </span>
+                          <span className="font-code-sm text-[10px] text-secondary">
+                            {new Date(item.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <p className="font-body-sm text-body-sm text-secondary">
+                          {item.detail}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </section>
+          </div>
+        )}
+      </main>
 
-          {/* 2. ISSUE SUMMARY & REPOSITORY CONTEXT */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center justify-between pb-1">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary text-[20px]">description</span>
-                <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                  Issue Spec & Repository Context
-                </h4>
-              </div>
-              <span className="font-code-sm text-code-sm text-secondary">Extracted via AST Indexer</span>
-            </div>
-
-            <p className="font-body-md text-body-md text-on-surface leading-relaxed bg-surface-container-low p-3.5 rounded-lg border border-surface-container-low">
-              "{contribution.specContext.description}"
+      {/* 5. Revision Feedback Modal */}
+      {showRevisionModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <form onSubmit={handleRequestRevision} className="bg-surface-container-lowest rounded-2xl max-w-lg w-full p-6 border border-surface-container shadow-2xl space-y-4">
+            <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+              Request Plan Revision
+            </h3>
+            <p className="font-body-sm text-body-sm text-secondary">
+              Provide feedback or specific directives for revising the proposed implementation plan.
             </p>
-
-            {/* Tech Stack Context Badges */}
-            <div className="flex items-center gap-2 flex-wrap pt-1">
-              {contribution.specContext.techStack.map((tech) => (
-                <span
-                  key={tech.name}
-                  className="px-2.5 py-1 rounded-md bg-surface-container text-on-surface font-code-sm text-code-sm flex items-center gap-1.5 border border-surface-container-high/40"
-                >
-                  <span className={`w-2 h-2 rounded-full ${tech.color}`}></span>
-                  <span>{tech.name}</span>
-                </span>
-              ))}
-              <span className="px-2.5 py-1 rounded-md bg-surface-container-high text-on-surface font-code-sm text-code-sm ml-auto">
-                {contribution.specContext.stats}
-              </span>
+            <textarea
+              required
+              rows={4}
+              value={revisionFeedback}
+              onChange={(e) => setRevisionFeedback(e.target.value)}
+              placeholder="e.g. Please add specific unit tests for the filter debounce routine..."
+              className="w-full p-3 bg-surface-container-low rounded-lg font-body-sm text-body-sm text-on-surface border border-surface-container focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRevisionModal(false)}
+                className="px-4 py-2 rounded-lg bg-surface-container text-on-surface font-label-md text-label-md font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold cursor-pointer"
+              >
+                Submit Feedback
+              </button>
             </div>
-          </section>
-
-          {/* 3. EXECUTION PLAN PANEL */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center justify-between pb-1 flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary text-[20px]">alt_route</span>
-                <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                  Execution Plan
-                </h4>
-                <span className="px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed font-code-sm text-code-sm font-semibold">
-                  {contribution.executionPlan.progressLabel}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 rounded bg-tertiary-fixed text-on-tertiary-fixed font-label-caps text-label-caps font-semibold flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[13px]">verified_user</span>
-                  <span>User Approved</span>
-                </span>
-                <button
-                  type="button"
-                  className="px-2.5 py-1 rounded text-secondary hover:text-on-surface hover:bg-surface-container font-label-md text-label-md transition-colors"
-                >
-                  Request Changes
-                </button>
-              </div>
-            </div>
-
-            {/* Plan Step Progression List */}
-            <div className="flex flex-col gap-1.5">
-              {contribution.executionPlan.steps.map((step) => {
-                const isCompleted = step.status === 'completed';
-                const isInProgress = step.status === 'in_progress';
-                const isBlocked = step.status === 'blocked';
-
-                return (
-                  <div
-                    key={step.id}
-                    className={`flex items-center justify-between p-2.5 rounded-lg border transition-colors ${
-                      isInProgress
-                        ? 'bg-primary-fixed/20 border-primary/30 shadow-sm'
-                        : isBlocked
-                        ? 'bg-error-container/20 border-error/30'
-                        : isCompleted
-                        ? 'bg-surface-container-low border-surface-container-high/30'
-                        : 'bg-surface border-surface-container opacity-70'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      {isCompleted && (
-                        <div className="w-5 h-5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed flex items-center justify-center shrink-0">
-                          <span className="material-symbols-outlined text-[14px]">check</span>
-                        </div>
-                      )}
-                      {isInProgress && (
-                        <div className="w-5 h-5 rounded-full bg-primary text-on-primary flex items-center justify-center animate-pulse shrink-0">
-                          <span className="w-2 h-2 rounded-full bg-on-primary"></span>
-                        </div>
-                      )}
-                      {isBlocked && (
-                        <div className="w-5 h-5 rounded-full bg-error-container text-on-error-container flex items-center justify-center shrink-0">
-                          <span className="material-symbols-outlined text-[14px]">block</span>
-                        </div>
-                      )}
-                      {!isCompleted && !isInProgress && !isBlocked && (
-                        <div className="w-5 h-5 rounded-full bg-surface-container flex items-center justify-center text-outline shrink-0">
-                          <span className="w-1.5 h-1.5 rounded-full bg-outline"></span>
-                        </div>
-                      )}
-
-                      <span
-                        className={`font-body-md text-body-md truncate ${
-                          isCompleted
-                            ? 'line-through decoration-secondary text-secondary'
-                            : isInProgress
-                            ? 'font-semibold text-on-surface'
-                            : isBlocked
-                            ? 'text-error font-medium'
-                            : 'text-secondary'
-                        }`}
-                      >
-                        {step.title}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span
-                        className={`px-2 py-0.5 rounded font-code-sm text-[10px] font-semibold ${
-                          isCompleted
-                            ? 'bg-surface-container text-secondary'
-                            : isInProgress
-                            ? 'bg-primary text-on-primary'
-                            : isBlocked
-                            ? 'bg-error text-on-error'
-                            : 'bg-surface-container text-secondary'
-                        }`}
-                      >
-                        {step.statusLabel}
-                      </span>
-                      {step.governanceTag && (
-                        <span
-                          className={`font-code-sm text-[11px] ${
-                            isInProgress
-                              ? 'text-primary font-medium'
-                              : isBlocked
-                              ? 'text-error font-medium'
-                              : 'text-secondary-fixed-dim'
-                          }`}
-                        >
-                          {step.governanceTag}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          {/* 4. FILES BEING INVESTIGATED & MODIFIED */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center justify-between pb-1">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary text-[20px]">folder_open</span>
-                <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                  Staged Files & Working Tree
-                </h4>
-              </div>
-              <span className="font-code-sm text-code-sm text-secondary">
-                {contribution.stagedFiles.length} Modified in this run
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              {contribution.stagedFiles.map((file) => (
-                <div
-                  key={file.path}
-                  className="flex items-center justify-between p-2.5 rounded-lg bg-surface-container-low hover:bg-surface-container transition-colors border border-surface-container-high/30"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="material-symbols-outlined text-primary text-[18px] shrink-0">
-                      {file.status === 'New File' ? 'note_add' : 'javascript'}
-                    </span>
-                    <span className="font-code-md text-code-md text-on-surface font-medium truncate font-mono">
-                      {file.path}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="font-code-sm text-code-sm text-tertiary font-semibold">
-                      +{file.additions}
-                    </span>
-                    <span className="font-code-sm text-code-sm text-error font-semibold">
-                      -{file.deletions}
-                    </span>
-                    <span
-                      className={`px-2 py-0.5 rounded font-code-sm text-[11px] ${
-                        file.status === 'New File'
-                          ? 'bg-tertiary-fixed text-on-tertiary-fixed'
-                          : 'bg-secondary-fixed text-on-secondary-fixed'
-                      }`}
-                    >
-                      {file.status}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => navigate(`/contributions/${id || '381'}/conflicts`)}
-                      className="p-1 text-secondary hover:text-on-surface"
-                      title="Inspect Diff"
-                    >
-                      <span className="material-symbols-outlined text-[16px]">visibility</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+          </form>
         </div>
-
-        {/* RIGHT 1/3 COLUMN: Safety, State Ledger & Acceptance */}
-        <div className="xl:col-span-4 flex flex-col gap-6">
-          {/* 1. STATE CLASSIFICATION LEDGER */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center gap-2 pb-1">
-              <span className="material-symbols-outlined text-primary text-[20px]">shield</span>
-              <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                Governance & Authority Ledger
-              </h4>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 my-1">
-              <div className="bg-surface-container-low p-2.5 rounded-lg flex flex-col border border-surface-container">
-                <span className="font-label-caps text-[10px] text-secondary">AI Suggested</span>
-                <span className="font-headline-md text-headline-md text-on-surface font-bold mt-0.5">
-                  {contribution.governanceLedger.aiSuggested.count}
-                </span>
-                <span className="font-code-sm text-[11px] text-secondary mt-0.5">
-                  {contribution.governanceLedger.aiSuggested.note}
-                </span>
-              </div>
-
-              <div className="bg-primary-fixed/30 p-2.5 rounded-lg flex flex-col border border-primary/20">
-                <span className="font-label-caps text-[10px] text-primary">AI Prepared</span>
-                <span className="font-headline-md text-headline-md text-primary font-bold mt-0.5">
-                  {contribution.governanceLedger.aiPrepared.count}
-                </span>
-                <span className="font-code-sm text-[11px] text-primary mt-0.5">
-                  {contribution.governanceLedger.aiPrepared.note}
-                </span>
-              </div>
-
-              <div className="bg-tertiary-fixed/40 p-2.5 rounded-lg flex flex-col border border-tertiary/20">
-                <span className="font-label-caps text-[10px] text-on-tertiary-fixed">User Approved</span>
-                <span className="font-headline-md text-headline-md text-on-tertiary-fixed font-bold mt-0.5">
-                  {contribution.governanceLedger.userApproved.count}
-                </span>
-                <span className="font-code-sm text-[11px] text-tertiary font-medium mt-0.5">
-                  {contribution.governanceLedger.userApproved.note}
-                </span>
-              </div>
-
-              <div className="bg-surface-container-high p-2.5 rounded-lg flex flex-col border border-surface-container-highest">
-                <span className="font-label-caps text-[10px] text-secondary">GitHub Verified</span>
-                <span className="font-headline-md text-headline-md text-outline font-bold mt-0.5">
-                  {contribution.governanceLedger.githubVerified.count}
-                </span>
-                <span className="font-code-sm text-[11px] text-secondary mt-0.5">
-                  {contribution.governanceLedger.githubVerified.note}
-                </span>
-              </div>
-            </div>
-
-            <div className="bg-surface-container-low p-3 rounded-lg border border-surface-container">
-              <p className="font-code-sm text-code-sm text-secondary leading-relaxed">
-                <strong className="text-on-surface font-semibold">Strict Rule:</strong>{' '}
-                {contribution.governanceLedger.strictRule}
-              </p>
-            </div>
-          </section>
-
-          {/* 2. ACCEPTANCE VERIFICATION SUMMARY */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center gap-2 pb-1">
-              <span className="material-symbols-outlined text-primary text-[20px]">checklist</span>
-              <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                Acceptance Verification
-              </h4>
-            </div>
-
-            {/* Overall status score badge */}
-            <div className="p-2.5 rounded-lg bg-error-container/20 border border-error/30 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-error animate-ping"></span>
-                <span className="font-headline-sm text-headline-sm text-error font-bold">
-                  {contribution.acceptanceSummary.status}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 font-code-sm text-code-sm">
-                <span className="text-tertiary font-semibold">
-                  {contribution.acceptanceSummary.passedCount} Passed
-                </span>
-                <span className="text-outline">•</span>
-                <span className="text-error font-semibold">
-                  {contribution.acceptanceSummary.blockedCount} Blocked
-                </span>
-              </div>
-            </div>
-
-            {/* Breakdown items with evidence links */}
-            <div className="flex flex-col gap-1.5 mt-1">
-              {contribution.acceptanceSummary.items.map((item) => {
-                const isPassed = item.status === 'Passed';
-                return (
-                  <div
-                    key={item.id}
-                    className={`p-2 rounded border flex flex-col gap-0.5 ${
-                      isPassed
-                        ? 'bg-surface-container-low border-surface-container-high/40'
-                        : 'bg-error-container/30 border-error/30'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`font-body-sm text-body-sm flex items-center gap-1.5 font-medium ${
-                          isPassed ? 'text-on-surface' : 'text-error font-semibold'
-                        }`}
-                      >
-                        <span
-                          className={`material-symbols-outlined text-[16px] ${
-                            isPassed ? 'text-tertiary' : 'text-error'
-                          }`}
-                        >
-                          {isPassed ? 'check_circle' : 'cancel'}
-                        </span>
-                        {item.title}
-                      </span>
-                      <span
-                        className={`font-code-sm text-code-sm font-bold ${
-                          isPassed ? 'text-tertiary' : 'text-error'
-                        }`}
-                      >
-                        {item.status}
-                      </span>
-                    </div>
-
-                    {item.evidencePath && (
-                      <span className="font-code-sm text-[11px] text-secondary pl-5 truncate font-mono">
-                        Evidence: {item.evidencePath}
-                      </span>
-                    )}
-                    {item.statusNote && (
-                      <span className="font-code-sm text-[11px] text-error pl-5 font-mono">
-                        Status: {item.statusNote}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          {/* 3. SESSION ACTIVITY */}
-          <section className="bg-surface-container-lowest rounded-xl p-5 border border-surface-container shadow-sm flex flex-col gap-3">
-            <div className="flex items-center justify-between pb-1">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary text-[20px]">schedule</span>
-                <h4 className="font-headline-sm text-headline-sm text-on-surface font-semibold">
-                  Session Activity
-                </h4>
-              </div>
-              <span className="font-code-sm text-code-sm text-secondary">Today</span>
-            </div>
-
-            <div className="flex flex-col gap-2 font-code-sm text-code-sm">
-              {contribution.sessionActivity.map((act, idx) => (
-                <div key={idx} className="flex items-start gap-2">
-                  <span className="text-secondary shrink-0 font-mono">{act.time}</span>
-                  <div className="flex items-center gap-1.5 text-on-surface">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                        act.type === 'agent'
-                          ? 'bg-primary'
-                          : act.type === 'user' || act.type === 'success'
-                          ? 'bg-tertiary'
-                          : 'bg-outline'
-                      }`}
-                    ></span>
-                    <span>{act.text}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        </div>
-      </div>
+      )}
     </div>
   );
 };
+
+/**
+ * Deterministic Demo Session generator for offline demonstration.
+ */
+function getDemoSession(id: string): ContributionSession {
+  const now = new Date().toISOString();
+  return {
+    id,
+    repositoryOwner: 'DigiNodes',
+    repositoryName: 'truthbounty-frontend',
+    upstreamRepository: 'DigiNodes/truthbounty-frontend',
+    issueNumber: 381,
+    issueTitle: 'Improve search and filter discoverability in signal lists',
+    issueUrl: 'https://github.com/DigiNodes/truthbounty-frontend/issues/381',
+    contributorUsername: 'contributor',
+    repositoryAccessStatus: 'app_authorized',
+    analysisStatus: 'PLAN_READY',
+    createdTimestamp: now,
+    updatedTimestamp: now,
+    repositoryIntelligence: {
+      owner: 'DigiNodes',
+      repo: 'truthbounty-frontend',
+      defaultBranch: 'main',
+      description: 'Decentralized truth verification frontend',
+      stars: 142,
+      forks: 38,
+      openIssuesCount: 4,
+      isPrivate: false,
+      discoveredInstructionFiles: ['CONTRIBUTING.md', 'package.json'],
+      discoveredInstructions: [
+        {
+          category: 'pr_expectations',
+          title: 'Repository Contribution Guidelines',
+          details: 'All pull requests must pass local vitest and eslint verification before opening PR.',
+          sourceFile: 'CONTRIBUTING.md',
+        },
+      ],
+      workflowFiles: ['.github/workflows/ci.yml'],
+      relevantSourceDirs: ['src', 'components'],
+      relevantTestDirs: ['tests'],
+      totalTreeFilesCount: 84,
+      sampleTreeFiles: ['src/components/SignalList.tsx', 'src/components/SearchFilter.tsx', 'tests/SignalList.test.ts'],
+    },
+    issueIntelligence: {
+      problemStatement: 'Users cannot easily find or filter signals in dense list views.',
+      requestedBehavior: 'Make filter controls permanently visible and add instant search feedback.',
+      expectedBehavior: 'Search controls remain sticky at top of list with clear badges for active filters.',
+      explicitRequirements: [
+        'Search controls remain visible and discoverable in the signal list.',
+        'Selected filter pills display count of active matches.',
+      ],
+      inferredRequirements: [
+        'Provide unit tests under Vitest verifying filter reactivity.',
+        'Ensure strict TypeScript compliance with zero lint regressions.',
+      ],
+      unknownsAndQuestions: [],
+      filesMentioned: ['src/components/SignalList.tsx'],
+      apisMentioned: [],
+      dependenciesMentioned: ['lucide-react', 'vitest'],
+      testsRequested: ['Unit test for filter query change'],
+      documentationRequirements: [],
+      constraints: ['Preserve existing responsive layout breakpoints'],
+      securityConsiderations: ['Sanitize user input before regex filtering'],
+      outOfScopeItems: ['Backend search API changes', 'Database schema updates'],
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-01',
+        description: 'Search controls remain visible and discoverable in the signal list.',
+        source: 'ISSUE',
+        type: 'UX',
+        verificationStrategy: 'Inspect affected component + verify sticky positioning.',
+        confidence: 'HIGH',
+      },
+      {
+        id: 'AC-02',
+        description: 'Selected filter pills display count of active matches.',
+        source: 'ISSUE',
+        type: 'FUNCTIONAL',
+        verificationStrategy: 'Verify filter match counter increments correctly.',
+        confidence: 'HIGH',
+      },
+      {
+        id: 'AC-03',
+        description: 'Pass Vitest unit test suite covering modified routines.',
+        source: 'EXISTING_TEST',
+        type: 'TEST',
+        verificationStrategy: 'Run npm test / vitest run tests/SignalList.test.ts.',
+        confidence: 'HIGH',
+      },
+    ],
+    relevantFiles: [
+      {
+        path: 'src/components/SignalList.tsx',
+        category: 'PRIMARY',
+        reason: 'Main component rendering signal items and filter toolbar.',
+        confidence: 'HIGH',
+        modificationLikely: true,
+      },
+      {
+        path: 'tests/SignalList.test.ts',
+        category: 'TEST',
+        reason: 'Unit test suite for signal list component.',
+        confidence: 'HIGH',
+        modificationLikely: true,
+      },
+    ],
+    dependenciesAndConfig: {
+      framework: 'React',
+      language: 'TypeScript',
+      packageManager: 'npm',
+      runtime: 'Node.js',
+      majorDependencies: ['react', 'react-dom', 'lucide-react', 'vitest'],
+      testFramework: 'Vitest',
+      lintTooling: 'ESLint',
+      buildTooling: 'Vite',
+      ciSystem: 'GitHub Actions',
+      externalConfiguration: [],
+    },
+    blockers: [],
+    implementationPlan: {
+      issueSummary: 'Issue #381: Improve search and filter discoverability in signal lists',
+      repositoryUnderstanding: 'DigiNodes/truthbounty-frontend (TypeScript, React) with Vitest tooling.',
+      proposedChanges: [
+        {
+          id: 'change-1',
+          targetFile: 'src/components/SignalList.tsx',
+          description: 'Refactor search header to sticky container and add active filter badges.',
+          mappedAcceptanceCriteriaIds: ['AC-01', 'AC-02'],
+        },
+        {
+          id: 'change-2',
+          targetFile: 'tests/SignalList.test.ts',
+          description: 'Add tests for search filtering and active filter badge counts.',
+          mappedAcceptanceCriteriaIds: ['AC-03'],
+        },
+      ],
+      testsToRun: ['npm test / vitest run tests/SignalList.test.ts'],
+      buildLintVerification: ['npm run lint', 'tsc --noEmit'],
+      risks: ['Ensure mobile responsiveness on narrow viewports'],
+      blockers: [],
+      outOfScopeItems: ['Backend search API changes'],
+      estimatedChangeSurface: 'SMALL',
+    },
+    humanApproval: {
+      status: 'pending',
+    },
+    activityTimeline: [
+      {
+        id: 't-1',
+        stage: 'Issue Loaded',
+        timestamp: now,
+        detail: 'Targeted #381 in DigiNodes/truthbounty-frontend for read-only inspection.',
+        completed: true,
+      },
+      {
+        id: 't-2',
+        stage: 'Repository Inspected',
+        timestamp: now,
+        detail: 'Tree indexed (84 files), CONTRIBUTING.md found.',
+        completed: true,
+      },
+      {
+        id: 't-3',
+        stage: 'Instructions Found',
+        timestamp: now,
+        detail: 'Discovered contributor guidelines from CONTRIBUTING.md.',
+        completed: true,
+      },
+      {
+        id: 't-4',
+        stage: 'Acceptance Criteria Generated',
+        timestamp: now,
+        detail: 'Synthesized 3 structured criteria (AC-01 to AC-03).',
+        completed: true,
+      },
+      {
+        id: 't-5',
+        stage: 'Relevant Files Identified',
+        timestamp: now,
+        detail: 'Identified src/components/SignalList.tsx and tests/SignalList.test.ts.',
+        completed: true,
+      },
+      {
+        id: 't-6',
+        stage: 'Plan Generated',
+        timestamp: now,
+        detail: 'Structured implementation plan ready for human review.',
+        completed: true,
+      },
+      {
+        id: 't-7',
+        stage: 'Waiting For Approval',
+        timestamp: now,
+        detail: 'Plan submitted to human contributor. Implementation has not started.',
+        completed: true,
+        active: true,
+      },
+    ],
+  };
+}
