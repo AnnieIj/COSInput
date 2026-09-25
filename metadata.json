@@ -1,0 +1,6 @@
+{
+  "name": "COSInput",
+  "description": "Contribution Open Source Input - Sovereign Autonomous Open Source Contribution & Guardian Platform",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

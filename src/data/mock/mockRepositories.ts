@@ -1,0 +1,105 @@
+/**
+ * Demo Presentation Data for Repositories and Issues Directory
+ */
+
+import type { RepositoryItem, IssueItem } from './types';
+
+export const mockRepositories: RepositoryItem[] = [
+  {
+    id: 'repo-1',
+    owner: 'DigiNodes',
+    name: 'truthbounty-frontend',
+    fullName: 'DigiNodes / truthbounty-frontend',
+    description: 'Decentralized cryptographic bounty and staking verification web application.',
+    stars: 1420,
+    forks: 310,
+    openIssuesCount: 14,
+    activePRsCount: 3,
+    isWatching: true,
+    techStack: ['Next.js 14', 'TypeScript 5.4', 'Wagmi/Viem', 'TailwindCSS', 'Vitest'],
+    lastSynced: '2m ago',
+  },
+  {
+    id: 'repo-2',
+    owner: 'facebook',
+    name: 'react',
+    fullName: 'facebook / react',
+    description: 'The library for web and native user interfaces.',
+    stars: 228000,
+    forks: 46100,
+    openIssuesCount: 842,
+    activePRsCount: 120,
+    isWatching: false,
+    techStack: ['JavaScript', 'Flow', 'C++', 'Compiler'],
+    lastSynced: '1h ago',
+  },
+  {
+    id: 'repo-3',
+    owner: 'tailwindlabs',
+    name: 'tailwindcss',
+    fullName: 'tailwindlabs / tailwindcss',
+    description: 'A utility-first CSS framework for rapid UI development.',
+    stars: 84000,
+    forks: 4200,
+    openIssuesCount: 45,
+    activePRsCount: 12,
+    isWatching: false,
+    techStack: ['Rust', 'TypeScript', 'CSS', 'LightningCSS'],
+    lastSynced: '3h ago',
+  },
+];
+
+export const mockIssues: IssueItem[] = [
+  {
+    id: '381',
+    number: 381,
+    repository: 'DigiNodes / truthbounty-frontend',
+    title: 'Build the Verification and Stake Flow',
+    summary: 'Users need to submit staking transactions and verify cryptographic bounty proofs before token disbursement. Requires form validation, Web3 wallet signature triggers, and fallback state.',
+    author: 'vitalik-fan',
+    createdAt: '2 days ago',
+    updatedAt: '3m ago',
+    status: 'active_contribution',
+    labels: [
+      { text: 'feature', color: 'bg-primary-container text-on-primary' },
+      { text: 'smart-contracts', color: 'bg-secondary-container text-on-secondary-fixed' },
+      { text: 'high-priority', color: 'bg-error-container text-on-error-container' },
+    ],
+    acceptanceCriteriaCount: 6,
+    activeRunId: 'run_8f92a10c',
+    activeContributionId: '381',
+  },
+  {
+    id: '379',
+    number: 379,
+    repository: 'DigiNodes / truthbounty-frontend',
+    title: 'Arbitrum One chain migration and gas limit recalculation',
+    summary: 'Migrate chain configuration hooks from Goerli testnet to Arbitrum One mainnet RPC endpoints with strict network switch guard banner.',
+    author: 'charlie-maintainer',
+    createdAt: '3 days ago',
+    updatedAt: '12m ago',
+    status: 'review',
+    labels: [
+      { text: 'infrastructure', color: 'bg-surface-container-high text-on-surface' },
+      { text: 'arbitrum', color: 'bg-tertiary-container text-on-tertiary-container' },
+    ],
+    acceptanceCriteriaCount: 4,
+    activeContributionId: '379',
+  },
+  {
+    id: '372',
+    number: 372,
+    repository: 'DigiNodes / truthbounty-frontend',
+    title: 'Fix hydration mismatch on wallet connector button',
+    summary: 'SSR rendered connector button displays mismatched connected state on initial client load when localStorage has cached address.',
+    author: 'frontend-guru',
+    createdAt: '5 days ago',
+    updatedAt: '1d ago',
+    status: 'triage',
+    labels: [
+      { text: 'bug', color: 'bg-error-container text-on-error-container' },
+      { text: 'ssr', color: 'bg-surface-container text-secondary' },
+    ],
+    acceptanceCriteriaCount: 3,
+  },
+];
