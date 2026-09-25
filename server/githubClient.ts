@@ -58,6 +58,19 @@ export class GitHubServerClient {
     error?: SanitizedGitHubError;
   }> {
     const config = getGitHubAppConfig();
+
+    // If private key parsing or validation failed, return sanitized AUTHENTICATION_FAILURE
+    if (config.keyError) {
+      return {
+        configured: Boolean(config.appId),
+        state: 'AUTH_FAILED',
+        installationsCount: 0,
+        appSlug: config.appSlug,
+        activeInstallation: null,
+        error: config.keyError,
+      };
+    }
+
     if (!config.isConfigured) {
       return {
         configured: false,
@@ -123,6 +136,16 @@ export class GitHubServerClient {
         activeInstallation: active,
       };
     } catch (err: any) {
+      if (err && err.classification === 'AUTHENTICATION_FAILURE') {
+        return {
+          configured: true,
+          state: 'AUTH_FAILED',
+          installationsCount: 0,
+          appSlug: config.appSlug,
+          activeInstallation: null,
+          error: err,
+        };
+      }
       return {
         configured: true,
         state: 'API_UNAVAILABLE',
@@ -132,7 +155,7 @@ export class GitHubServerClient {
         error: {
           classification: 'NETWORK_FAILURE',
           statusCode: 0,
-          message: err.message || 'Unable to connect to GitHub API endpoint.',
+          message: err?.message || 'Unable to connect to GitHub API endpoint.',
         },
       };
     }

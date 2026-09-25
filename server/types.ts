@@ -21,6 +21,8 @@ export type GitHubErrorClassification =
   | 'GITHUB_SERVICE_FAILURE'
   | 'NETWORK_FAILURE';
 
+import type crypto from 'crypto';
+
 export interface GitHubAppConfig {
   appId: string | null;
   appSlug: string | null;
@@ -28,6 +30,8 @@ export interface GitHubAppConfig {
   clientSecret: string | null;
   webhookSecret: string | null;
   privateKey: string | null;
+  privateKeyObject: crypto.KeyObject | null;
+  keyError?: SanitizedGitHubError;
   isConfigured: boolean;
 }
 

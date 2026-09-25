@@ -19,13 +19,20 @@ githubRouter.get('/status', async (_req, res) => {
     const status = await githubServerClient.getConnectionStatus();
     res.json(status);
   } catch (err: any) {
+    if (err && err.classification === 'AUTHENTICATION_FAILURE') {
+      return res.status(401).json({
+        configured: true,
+        state: 'AUTH_FAILED',
+        error: err,
+      });
+    }
     res.status(500).json({
       configured: false,
       state: 'API_UNAVAILABLE',
       error: {
         classification: 'GITHUB_SERVICE_FAILURE',
         statusCode: 500,
-        message: err.message || 'Error checking GitHub connection status',
+        message: 'Error checking GitHub connection status',
       },
     });
   }

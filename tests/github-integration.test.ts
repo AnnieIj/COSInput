@@ -1,7 +1,7 @@
 /**
  * COSInput Foundation v0.2 - GitHub Integration Test Suite
  * Tests error classification, webhook HMAC verification, event storage,
- * and safety invariants (read-only enforcement).
+ * safety invariants (read-only enforcement), and multiline/escaped PEM key loading & validation.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import { classifyGitHubError } from '../server/githubClient';
 import { verifyGitHubWebhookSignature, processVerifiedWebhook } from '../server/webhookHandler';
 import { recordWebhookEvent, getRecentWebhookEvents, clearWebhookEvents } from '../server/eventStore';
+import { normalizeAndValidatePrivateKey } from '../server/config';
 import { RealGitHubService } from '../src/services/github.service';
 
 describe('GitHub Error Classification', () => {
@@ -49,6 +50,110 @@ describe('GitHub Error Classification', () => {
     const error = classifyGitHubError(503, 'Service Unavailable');
     expect(error.classification).toBe('GITHUB_SERVICE_FAILURE');
     expect(error.statusCode).toBe(503);
+  });
+});
+
+describe('GitHub App Private Key Normalization & Validation', () => {
+  // Generate real test RSA keys (PKCS#1 and PKCS#8)
+  const { privateKey: rsaPkcs1 } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  });
+
+  const { privateKey: rsaPkcs8 } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+
+  it('successfully parses raw multiline PKCS#1 PEM with preserved newlines', () => {
+    const result = normalizeAndValidatePrivateKey(rsaPkcs1);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+    expect(result.keyObject?.type).toBe('private');
+    expect(result.keyObject?.asymmetricKeyType).toBe('rsa');
+    expect(result.pem).toContain('-----BEGIN RSA PRIVATE KEY-----');
+  });
+
+  it('successfully parses raw multiline PKCS#8 PEM with preserved newlines', () => {
+    const result = normalizeAndValidatePrivateKey(rsaPkcs8);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+    expect(result.keyObject?.type).toBe('private');
+    expect(result.keyObject?.asymmetricKeyType).toBe('rsa');
+    expect(result.pem).toContain('-----BEGIN PRIVATE KEY-----');
+  });
+
+  it('successfully parses single-line strings with literal escaped \\n', () => {
+    const escaped = rsaPkcs1.replace(/\n/g, '\\n');
+    const result = normalizeAndValidatePrivateKey(escaped);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+    expect(result.keyObject?.asymmetricKeyType).toBe('rsa');
+  });
+
+  it('successfully parses keys wrapped in double quotes', () => {
+    const quoted = `"${rsaPkcs1.replace(/\n/g, '\\n')}"`;
+    const result = normalizeAndValidatePrivateKey(quoted);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+  });
+
+  it('successfully parses keys wrapped in single quotes', () => {
+    const singleQuoted = `'${rsaPkcs1.replace(/\n/g, '\\n')}'`;
+    const result = normalizeAndValidatePrivateKey(singleQuoted);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+  });
+
+  it('successfully parses keys with escaped quotes \\" ... \\"', () => {
+    const escapedQuotes = `\\"${rsaPkcs1.replace(/\n/g, '\\n')}\\"`;
+    const result = normalizeAndValidatePrivateKey(escapedQuotes);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+  });
+
+  it('successfully parses keys where newlines are collapsed into spaces', () => {
+    const spaced = rsaPkcs1.replace(/\r?\n/g, ' ');
+    const result = normalizeAndValidatePrivateKey(spaced);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+  });
+
+  it('successfully parses base64-encoded PEM strings', () => {
+    const b64 = Buffer.from(rsaPkcs1, 'utf8').toString('base64');
+    const result = normalizeAndValidatePrivateKey(b64);
+    expect(result.error).toBeUndefined();
+    expect(result.keyObject).not.toBeNull();
+  });
+
+  it('returns sanitized AUTHENTICATION_FAILURE for corrupt or invalid keys without leaking OpenSSL internals', () => {
+    const corruptKey = '-----BEGIN RSA PRIVATE KEY-----\nNOT_A_VALID_BASE64_OR_RSA_KEY\n-----END RSA PRIVATE KEY-----';
+    const result = normalizeAndValidatePrivateKey(corruptKey);
+
+    expect(result.keyObject).toBeNull();
+    expect(result.error).toBeDefined();
+    expect(result.error?.classification).toBe('AUTHENTICATION_FAILURE');
+    expect(result.error?.statusCode).toBe(401);
+
+    // CRITICAL: Must NEVER expose OpenSSL internals
+    expect(result.error?.message).not.toContain('DECODER routines');
+    expect(result.error?.message).not.toContain('error:1E08010C');
+    // Must NEVER leak the key material
+    expect(result.error?.message).not.toContain(corruptKey);
+  });
+
+  it('returns sanitized AUTHENTICATION_FAILURE for missing BEGIN/END delimiters', () => {
+    const result = normalizeAndValidatePrivateKey('invalid-arbitrary-text-secret');
+    expect(result.keyObject).toBeNull();
+    expect(result.error?.classification).toBe('AUTHENTICATION_FAILURE');
+    expect(result.error?.statusCode).toBe(401);
+  });
+
+  it('returns null keyObject when key is empty or null', () => {
+    expect(normalizeAndValidatePrivateKey(null).keyObject).toBeNull();
+    expect(normalizeAndValidatePrivateKey('').keyObject).toBeNull();
   });
 });
 

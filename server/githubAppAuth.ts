@@ -6,7 +6,7 @@
 
 import crypto from 'crypto';
 import { getGitHubAppConfig } from './config';
-import type { CachedInstallationToken } from './types';
+import type { CachedInstallationToken, SanitizedGitHubError } from './types';
 
 // In-memory cache for installation access tokens: installationId -> { token, expiresAt }
 const tokenCache = new Map<number, CachedInstallationToken>();
@@ -19,11 +19,30 @@ function base64url(input: string | Buffer): string {
 /**
  * Generates an RS256 JSON Web Token (JWT) authenticated as the GitHub App.
  * Valid for max 10 minutes (9 minutes with 60-second backdate for clock drift).
+ * Uses validated KeyObject. Never exposes OpenSSL internal error strings or key material.
  */
 export function generateAppJWT(): string {
   const config = getGitHubAppConfig();
-  if (!config.appId || !config.privateKey) {
-    throw new Error('GitHub App is not configured. Missing GITHUB_APP_ID or private key.');
+  if (!config.appId) {
+    const error: SanitizedGitHubError = {
+      classification: 'AUTHENTICATION_FAILURE',
+      statusCode: 401,
+      message: 'GitHub App is not configured. Missing GITHUB_APP_ID.',
+    };
+    throw error;
+  }
+
+  if (config.keyError) {
+    throw config.keyError;
+  }
+
+  if (!config.privateKeyObject) {
+    const error: SanitizedGitHubError = {
+      classification: 'AUTHENTICATION_FAILURE',
+      statusCode: 401,
+      message: 'GitHub App private key is missing or invalid. Please check GITHUB_PRIVATE_KEY.',
+    };
+    throw error;
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -42,11 +61,20 @@ export function generateAppJWT(): string {
   const encodedPayload = base64url(JSON.stringify(payload));
   const signingInput = `${encodedHeader}.${encodedPayload}`;
 
-  const signer = crypto.createSign('RSA-SHA256');
-  signer.update(signingInput);
-  const signature = signer.sign(config.privateKey, 'base64url');
-
-  return `${signingInput}.${signature}`;
+  try {
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(signingInput);
+    const signature = signer.sign(config.privateKeyObject, 'base64url');
+    return `${signingInput}.${signature}`;
+  } catch (_err) {
+    // Strictly sanitized error: never expose OpenSSL decoder internals or key material
+    const error: SanitizedGitHubError = {
+      classification: 'AUTHENTICATION_FAILURE',
+      statusCode: 401,
+      message: 'Failed to sign GitHub App authentication token. Private key is invalid or incompatible.',
+    };
+    throw error;
+  }
 }
 
 /**
