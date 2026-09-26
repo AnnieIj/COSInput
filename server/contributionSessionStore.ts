@@ -107,9 +107,47 @@ class ContributionSessionStore {
     return session;
   }
 
+  resetAnalysisAttempt(id: string) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+
+    // Retain session initialization and human governance events
+    const retained = session.activityTimeline.filter(
+      (ev) =>
+        ev.stage === 'Session Initialized' ||
+        ev.stage.includes('Approved') ||
+        ev.stage.includes('Revision') ||
+        ev.stage.includes('Cancelled')
+    );
+    session.activityTimeline = retained.length > 0 ? retained : [
+      {
+        id: 'timeline-init',
+        stage: 'Session Initialized',
+        timestamp: new Date().toISOString(),
+        detail: `Contribution analysis context prepared for #${session.issueNumber} in ${session.upstreamRepository}. Zero GitHub writes.`,
+        completed: true,
+      },
+    ];
+    session.updatedTimestamp = new Date().toISOString();
+  }
+
   addTimelineEvent(id: string, stage: string, detail: string, completed = true, active = false) {
     const session = this.sessions.get(id);
     if (!session) return;
+
+    // Deduplicate by stage: update existing event instead of appending duplicate
+    const existingIndex = session.activityTimeline.findIndex((ev) => ev.stage === stage);
+    if (existingIndex !== -1) {
+      session.activityTimeline[existingIndex] = {
+        ...session.activityTimeline[existingIndex],
+        timestamp: new Date().toISOString(),
+        detail,
+        completed,
+        active,
+      };
+      session.updatedTimestamp = new Date().toISOString();
+      return;
+    }
 
     session.activityTimeline.push({
       id: `timeline-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,

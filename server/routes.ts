@@ -642,6 +642,9 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
   }
 
   try {
+    // Reset timeline for fresh analysis attempt (prevents duplicate event emission)
+    contributionSessionStore.resetAnalysisAttempt(session.id);
+
     // 1. Mark status: REPOSITORY_INSPECTION
     contributionSessionStore.updateSession(session.id, {
       analysisStatus: 'REPOSITORY_INSPECTION',

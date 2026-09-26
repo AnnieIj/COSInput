@@ -22,6 +22,7 @@ export const WorkspacePage: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [analyzing, setAnalyzing] = useState<boolean>(false);
   const [error, setError] = useState<SanitizedGitHubError | null>(null);
+  const hasAutoAnalyzedRef = React.useRef<string | null>(null);
 
   // Tab navigation inside workspace
   const [activeTab, setActiveTab] = useState<
@@ -45,8 +46,9 @@ export const WorkspacePage: React.FC = () => {
         if (res.success && res.session) {
           setSession(res.session);
 
-          // If session is newly created (NOT_STARTED), automatically run analysis
-          if (res.session.analysisStatus === 'NOT_STARTED') {
+          // If session is newly created (NOT_STARTED), automatically run analysis once
+          if (res.session.analysisStatus === 'NOT_STARTED' && hasAutoAnalyzedRef.current !== res.session.id) {
+            hasAutoAnalyzedRef.current = res.session.id;
             runAnalysis(id);
           }
         }
@@ -70,7 +72,10 @@ export const WorkspacePage: React.FC = () => {
             });
             if (createRes.success && createRes.session) {
               setSession(createRes.session);
-              runAnalysis(createRes.session.id);
+              if (hasAutoAnalyzedRef.current !== createRes.session.id) {
+                hasAutoAnalyzedRef.current = createRes.session.id;
+                runAnalysis(createRes.session.id);
+              }
               return;
             }
           } catch {
@@ -277,11 +282,11 @@ export const WorkspacePage: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col w-full min-h-screen bg-surface">
-      {/* 1. Top Context Header Bar */}
-      <header className="bg-surface-container-lowest px-4 lg:px-8 py-4 border-b border-surface-container shadow-sm">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex flex-col gap-1.5 min-w-0">
+    <div className="flex flex-col w-full bg-surface min-w-0">
+      {/* 1. Top Context Subheader Bar */}
+      <div className="bg-surface-container-lowest px-4 lg:px-8 py-4 border-b border-surface-container shadow-sm w-full">
+        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0">
+          <div className="flex flex-col gap-1.5 min-w-0 flex-1">
             <div className="flex items-center gap-2 font-code-sm text-code-sm text-secondary flex-wrap">
               <button
                 type="button"
@@ -301,8 +306,8 @@ export const WorkspacePage: React.FC = () => {
               </span>
             </div>
 
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h1 className="font-headline-md text-headline-md text-on-surface font-bold truncate">
+            <div className="flex items-center gap-2.5 flex-wrap min-w-0">
+              <h1 className="font-headline-md text-headline-md text-on-surface font-bold break-words max-w-full">
                 {session?.issueTitle || 'Contribution Analysis Workspace'}
               </h1>
               {session && renderStatusBadge(session.analysisStatus)}
@@ -352,7 +357,7 @@ export const WorkspacePage: React.FC = () => {
             </button>
           </div>
         </div>
-      </header>
+      </div>
 
       {/* 2. Error Diagnostic Box */}
       {error && (
@@ -984,24 +989,40 @@ export const WorkspacePage: React.FC = () => {
 
                   {session.blockers.length > 0 ? (
                     <div className="space-y-3">
-                      {session.blockers.map((b) => (
-                        <div key={b.id} className="p-4 rounded-xl bg-error-container/15 border border-error/30 space-y-2">
-                          <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <span className="px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold bg-error text-on-error">
-                              {b.category}
-                            </span>
+                      {session.blockers.map((b) => {
+                        const isConstraint = b.category === 'REPOSITORY_ACCESS_LIMITATION';
+                        return (
+                          <div
+                            key={b.id}
+                            className={`p-4 rounded-xl space-y-2 border ${
+                              isConstraint
+                                ? 'bg-amber-500/10 border-amber-500/25'
+                                : 'bg-error-container/15 border-error/30'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <span
+                                className={`px-2.5 py-0.5 rounded font-label-caps text-[10px] font-bold ${
+                                  isConstraint
+                                    ? 'bg-amber-500/20 text-amber-900 border border-amber-500/30'
+                                    : 'bg-error text-on-error'
+                                }`}
+                              >
+                                {isConstraint ? 'INFORMATIONAL EXECUTION CONSTRAINT' : b.category}
+                              </span>
+                            </div>
+                            <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                              {b.description}
+                            </h3>
+                            <p className="font-body-sm text-body-sm text-secondary">
+                              <strong>Impact:</strong> {b.impact}
+                            </p>
+                            <div className="p-2.5 rounded-lg bg-surface-container-low font-code-sm text-code-sm text-on-surface border border-surface-container">
+                              <strong>{isConstraint ? 'Guidance:' : 'Action:'}</strong> {b.recommendedNextAction}
+                            </div>
                           </div>
-                          <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
-                            {b.description}
-                          </h3>
-                          <p className="font-body-sm text-body-sm text-secondary">
-                            <strong>Impact:</strong> {b.impact}
-                          </p>
-                          <div className="p-2.5 rounded-lg bg-surface-container-low font-code-sm text-code-sm text-on-surface border border-surface-container">
-                            <strong>Action:</strong> {b.recommendedNextAction}
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="p-4 rounded-xl bg-tertiary-container/15 text-tertiary border border-tertiary/30 flex items-center gap-2">

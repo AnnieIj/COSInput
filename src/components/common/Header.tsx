@@ -68,7 +68,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenMobileMenu }) => {
   };
 
   return (
-    <header className="fixed top-0 left-0 lg:left-64 right-0 h-16 bg-surface/90 backdrop-blur-xl border-b border-surface-container z-40 flex items-center justify-between px-4 lg:px-6 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
+    <header className="sticky top-0 z-40 w-full h-16 bg-surface/90 backdrop-blur-xl border-b border-surface-container flex items-center justify-between px-4 lg:px-6 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
       {/* Left: Mobile Toggle & Global Search */}
       <div className="flex items-center gap-3 flex-1 max-w-2xl">
         <button

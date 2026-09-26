@@ -401,24 +401,51 @@ The swipe animation stutters when dragging quickly on mobile viewports.
       externalConfiguration: [],
     };
 
-    it('flags REPOSITORY_ACCESS_LIMITATION blocker when repository is not App-Authorized', () => {
+    it('records REPOSITORY_ACCESS_LIMITATION as an informational future constraint without blocking v0.3 analysis', () => {
       const analysis = issueAnalysisService.runGroundedSemanticAnalysis({
         issueNumber: 8,
-        issueTitle: 'Update hero banner copy',
-        issueBody: 'Change the title on the hero banner to TruthBounty v2.',
+        issueTitle: 'Update App component copy',
+        issueBody: 'Change the title in src/App.tsx to TruthBounty v2.',
         issueLabels: [{ name: 'copy' }],
         repositoryIntelligence: mockRepoIntelligence,
         dependencyConfig: mockDependencyConfig,
         repositoryAccessStatus: 'public_readable', // Not app_authorized!
       });
 
-      expect(analysis.isBlocked).toBe(true);
-      const accessBlocker = analysis.blockers.find(
+      // Public readability is sufficient for v0.3 analysis: isBlocked must NOT be triggered
+      expect(analysis.isBlocked).toBe(false);
+      const accessConstraint = analysis.blockers.find(
         (b) => b.category === 'REPOSITORY_ACCESS_LIMITATION'
       );
-      expect(accessBlocker).toBeDefined();
-      expect(accessBlocker?.description).toContain('write access is not authorized');
-      expect(accessBlocker?.recommendedNextAction).toContain('Install the COSInput GitHub App');
+      expect(accessConstraint).toBeDefined();
+      expect(accessConstraint?.description).toContain('public-readable');
+      expect(accessConstraint?.impact).toContain('Public repository analysis is available');
+    });
+
+    it('flags INSUFFICIENT_CODE_CONTEXT and blocks plan generation when zero relevant files are found for a code-change issue', () => {
+      const analysis = issueAnalysisService.runGroundedSemanticAnalysis({
+        issueNumber: 88,
+        issueTitle: 'Implement quantum entanglement hashing algorithm',
+        issueBody: 'Add qkd protocol encryption keys into quantum buffer.',
+        issueLabels: [{ name: 'enhancement' }],
+        repositoryIntelligence: {
+          ...mockRepoIntelligence,
+          allTreeFiles: ['README.md', 'LICENSE', 'docs/overview.md'],
+          sampleTreeFiles: ['README.md'],
+        },
+        dependencyConfig: mockDependencyConfig,
+        repositoryAccessStatus: 'app_authorized',
+      });
+
+      expect(analysis.isBlocked).toBe(true);
+      expect(analysis.relevantFiles.length).toBe(0);
+      const contextBlocker = analysis.blockers.find(
+        (b) => b.category === 'INSUFFICIENT_CODE_CONTEXT'
+      );
+      expect(contextBlocker).toBeDefined();
+      expect(contextBlocker?.description).toContain('zero evidence-backed implementation targets');
+      expect(analysis.implementationPlan.proposedChanges.length).toBe(0);
+      expect(analysis.implementationPlan.estimatedChangeSurface).toBe('UNSPECIFIED');
     });
 
     it('flags MISSING_CANONICAL_INFORMATION when issue contains unconfigured contract placeholder', () => {
@@ -569,6 +596,179 @@ The swipe animation stutters when dragging quickly on mobile viewports.
       });
 
       expect(mutatingCalls.length).toBe(0);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 7. Live Validation Fix Regressions (300+ files, API Keys / Expiry, Framework Detection)
+  // --------------------------------------------------------------------------
+  describe('Live Validation Fix Regressions', () => {
+    it('discovers relevant files in a 300+ file tree using dynamic concept extraction (chainsettle-backend #369)', () => {
+      // Build a realistic 306-file backend repository tree
+      const realistic300Tree: string[] = [];
+
+      // Add common backend modules
+      const modules = ['auth', 'users', 'settlements', 'transactions', 'webhooks', 'wallets', 'analytics', 'audit'];
+      for (const mod of modules) {
+        for (let i = 1; i <= 25; i++) {
+          realistic300Tree.push(`src/modules/${mod}/${mod}-${i}.service.ts`);
+          realistic300Tree.push(`src/modules/${mod}/${mod}-${i}.controller.ts`);
+        }
+      }
+
+      // Add API keys module specifically (targets for issue #369)
+      realistic300Tree.push('src/modules/api-keys/api-keys.service.ts');
+      realistic300Tree.push('src/modules/api-keys/api-keys.controller.ts');
+      realistic300Tree.push('src/modules/api-keys/dto/create-api-key.dto.ts');
+      realistic300Tree.push('src/modules/api-keys/api-keys.service.spec.ts');
+      realistic300Tree.push('src/entities/ApiKey.entity.ts');
+      realistic300Tree.push('src/database/migrations/20260325-add-api-key-expiry.ts');
+
+      // Add config / root files
+      realistic300Tree.push('package.json', 'tsconfig.json', 'README.md', '.env.example');
+
+      expect(realistic300Tree.length).toBeGreaterThan(300);
+
+      const repoIntel: RepositoryIntelligenceData = {
+        owner: 'shakurJJ',
+        repo: 'chainsettle-backend',
+        defaultBranch: 'main',
+        description: 'Settlement rails backend engine',
+        stars: 18,
+        forks: 4,
+        openIssuesCount: 7,
+        isPrivate: false,
+        discoveredInstructionFiles: ['package.json'],
+        discoveredInstructions: [],
+        workflowFiles: ['.github/workflows/ci.yml'],
+        relevantSourceDirs: ['src'],
+        relevantTestDirs: ['src/tests'],
+        totalTreeFilesCount: realistic300Tree.length,
+        sampleTreeFiles: realistic300Tree.slice(0, 50),
+        allTreeFiles: realistic300Tree,
+      };
+
+      const depConfig: DependencyConfigAnalysis = {
+        framework: 'NestJS',
+        language: 'TypeScript',
+        packageManager: 'pnpm',
+        runtime: 'Node.js',
+        majorDependencies: ['@nestjs/core', '@nestjs/common', 'prisma'],
+        testFramework: 'Jest',
+        lintTooling: 'ESLint',
+        buildTooling: 'tsup',
+        ciSystem: 'GitHub Actions',
+        externalConfiguration: [],
+      };
+
+      const analysis = issueAnalysisService.runGroundedSemanticAnalysis({
+        issueNumber: 369,
+        issueTitle: 'Add optional expiry (expiresAt) to API keys',
+        issueBody: 'Allow clients to create API keys with optional expiresAt date. Store expiresAt in database and validate on incoming requests.',
+        issueLabels: [{ name: 'enhancement' }, { name: 'security' }],
+        repositoryIntelligence: repoIntel,
+        dependencyConfig: depConfig,
+        repositoryAccessStatus: 'public_readable',
+      });
+
+      // Verification: Relevant files must NOT be 0
+      expect(analysis.relevantFiles.length).toBeGreaterThan(0);
+      expect(analysis.isBlocked).toBe(false);
+
+      const filePaths = analysis.relevantFiles.map((f) => f.path);
+      const hasApiKeyService = filePaths.some((p) => p.includes('api-keys.service.ts'));
+      const hasApiKeyEntity = filePaths.some((p) => p.includes('ApiKey.entity.ts') || p.includes('api-keys'));
+      expect(hasApiKeyService || hasApiKeyEntity).toBe(true);
+
+      // Proposed changes must map to ACs
+      expect(analysis.implementationPlan.proposedChanges.length).toBeGreaterThan(0);
+      for (const change of analysis.implementationPlan.proposedChanges) {
+        expect(change.mappedAcceptanceCriteriaIds.length).toBeGreaterThan(0);
+        expect(change.mappedAcceptanceCriteriaIds[0]).toMatch(/^AC-\d+/);
+      }
+
+      // Change surface must be calculated based on grounded targets (not defaulting to LARGE when 0 targets)
+      expect(['SMALL', 'MEDIUM', 'LARGE']).toContain(analysis.implementationPlan.estimatedChangeSurface);
+    });
+
+    it('prevents duplicate timeline event emissions across multiple calls', () => {
+      const created = contributionSessionStore.createSession({
+        repositoryOwner: 'dedup-org',
+        repositoryName: 'dedup-repo',
+        issueNumber: 1,
+        issueTitle: 'Test timeline dedup',
+        issueUrl: 'https://github.com/dedup-org/dedup-repo/issues/1',
+        contributorUsername: 'user',
+        repositoryAccessStatus: 'app_authorized',
+      });
+      const sessionId = created.id;
+
+      // Emit Issue Loaded 3 times (simulating re-render / double call)
+      contributionSessionStore.addTimelineEvent(sessionId, 'Issue Loaded', 'First load attempt');
+      contributionSessionStore.addTimelineEvent(sessionId, 'Issue Loaded', 'Second load attempt');
+      contributionSessionStore.addTimelineEvent(sessionId, 'Issue Loaded', 'Third load attempt');
+
+      const session = contributionSessionStore.getSession(sessionId);
+      expect(session).toBeDefined();
+
+      const issueLoadedEvents = session!.activityTimeline.filter((ev) => ev.stage === 'Issue Loaded');
+      // Must be deduplicated to exactly 1 event!
+      expect(issueLoadedEvents.length).toBe(1);
+      expect(issueLoadedEvents[0].detail).toBe('Third load attempt');
+
+      // Test resetAnalysisAttempt
+      contributionSessionStore.addTimelineEvent(sessionId, 'Repository Inspected', 'Inspected files');
+      contributionSessionStore.resetAnalysisAttempt(sessionId);
+
+      const resetSession = contributionSessionStore.getSession(sessionId);
+      const inspectedEvents = resetSession!.activityTimeline.filter((ev) => ev.stage === 'Repository Inspected');
+      expect(inspectedEvents.length).toBe(0);
+    });
+
+    it('correctly detects frameworks including NestJS, Fastify, Express, and None/framework-agnostic', () => {
+      // 1. NestJS
+      const nestPkg = JSON.stringify({
+        dependencies: { '@nestjs/core': '^10.0.0', '@nestjs/common': '^10.0.0' },
+      });
+      const nestConfig = repositoryIntelligenceService.analyzeDependenciesAndConfig(
+        { 'package.json': nestPkg },
+        ['package.json', 'src/main.ts'],
+        []
+      );
+      expect(nestConfig.framework).toBe('NestJS');
+
+      // 2. Fastify
+      const fastifyPkg = JSON.stringify({
+        dependencies: { fastify: '^4.0.0' },
+      });
+      const fastifyConfig = repositoryIntelligenceService.analyzeDependenciesAndConfig(
+        { 'package.json': fastifyPkg },
+        ['package.json', 'src/server.ts'],
+        []
+      );
+      expect(fastifyConfig.framework).toBe('Fastify');
+
+      // 3. Express
+      const expressPkg = JSON.stringify({
+        dependencies: { express: '^4.19.0' },
+      });
+      const expressConfig = repositoryIntelligenceService.analyzeDependenciesAndConfig(
+        { 'package.json': expressPkg },
+        ['package.json'],
+        []
+      );
+      expect(expressConfig.framework).toBe('Express');
+
+      // 4. Framework-agnostic / None
+      const agnosticPkg = JSON.stringify({
+        dependencies: { lodash: '^4.17.21', dotenv: '^16.0.0' },
+      });
+      const agnosticConfig = repositoryIntelligenceService.analyzeDependenciesAndConfig(
+        { 'package.json': agnosticPkg },
+        ['package.json'],
+        []
+      );
+      expect(agnosticConfig.framework).toBe('None / framework-agnostic');
     });
   });
 });

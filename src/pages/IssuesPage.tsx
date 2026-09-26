@@ -1046,7 +1046,7 @@ export const IssuesPage: React.FC = () => {
                 </p>
               ) : (
                 <p className="font-body-sm text-body-sm text-amber-900 bg-amber-500/10 p-2.5 rounded-lg border border-amber-500/20">
-                  ⚠️ <strong>Write Access Not Authorized:</strong> This repository is not installed in your COSInput GitHub App. COSInput can inspect issues and read specifications, but automated branch creation and PR submission will be blocked until the repository maintainer installs the COSInput GitHub App.
+                  ℹ️ <strong>Public Read Access Active:</strong> Public repository analysis is available. Repository write operations are not enabled in v0.3. Future contribution execution will determine the appropriate contributor fork and authorization path.
                 </p>
               )}
             </div>

@@ -10,12 +10,236 @@ import type {
   IssueIntelligenceData,
   AcceptanceCriterion,
   RelevantFile,
+  RelevantFileCategory,
   BlockerItem,
   ImplementationPlan,
   RepositoryIntelligenceData,
   DependencyConfigAnalysis,
   RepositoryAccessStatus,
 } from './types';
+
+export interface ExtractedConcepts {
+  primaryTerms: string[];
+  stemmedVariants: string[];
+  identifiers: string[];
+  codeTokens: string[];
+}
+
+/**
+ * Dynamically extracts domain identifiers, keywords, and architectural tokens from issue title and body.
+ * Avoids hardcoding any issue-specific terms.
+ */
+export function extractDynamicConcepts(title: string, body: string): ExtractedConcepts {
+  const fullText = `${title}\n${body}`;
+
+  // 1. Extract code tokens in backticks: `apiKey`, `expiresAt`, `src/foo/bar.ts`
+  const backtickMatches = (fullText.match(/`([^`]+)`/g) || []).map((m) =>
+    m.replace(/`/g, '').trim()
+  );
+
+  // 2. Extract identifiers (camelCase, PascalCase, snake_case, kebab-case)
+  const identifierMatches =
+    fullText.match(
+      /[a-zA-Z0-9]+(?:[A-Z][a-z0-9]+)+|[a-zA-Z0-9]+(?:[-_][a-zA-Z0-9]+)+/g
+    ) || [];
+
+  const identifiers = Array.from(new Set([...backtickMatches, ...identifierMatches]));
+
+  // 3. Decompose identifiers into constituent sub-tokens
+  const subTokens = new Set<string>();
+  for (const id of identifiers) {
+    const clean = id.toLowerCase().replace(/[^a-z0-9-_]/g, '');
+    if (clean.length >= 2) subTokens.add(clean);
+
+    // Split camelCase: expiresAt -> expires, at; apiKey -> api, key
+    const parts = id
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/[-_]/g, ' ')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((p) => p.length >= 2);
+    for (const p of parts) {
+      subTokens.add(p);
+    }
+  }
+
+  // 4. Tokenize title and body words (filtering only standard grammatical stop words)
+  const stopWords = new Set([
+    'the', 'and', 'for', 'with', 'from', 'that', 'this', 'have', 'when',
+    'should', 'must', 'will', 'can', 'are', 'were', 'was', 'been', 'has',
+    'had', 'not', 'but', 'what', 'some', 'add', 'fix', 'update', 'make',
+    'implement', 'change', 'support', 'allow', 'create', 'into', 'onto',
+    'over', 'under', 'between', 'such', 'than', 'then', 'also', 'about',
+    'each', 'more', 'most', 'very', 'optional', 'please', 'needed', 'needs',
+    'issue', 'pull', 'request', 'branch', 'file', 'code'
+  ]);
+
+  const rawWords = `${title} ${body}`
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .map((w) => w.toLowerCase().trim())
+    .filter((w) => w.length >= 2 && !stopWords.has(w));
+
+  const primaryTerms = Array.from(new Set([...Array.from(subTokens), ...rawWords]));
+
+  // 5. Expand stemming and inflectional variations
+  const stemmedVariants = new Set<string>();
+  for (const term of primaryTerms) {
+    stemmedVariants.add(term);
+    // Plural / singular stemming
+    if (term.endsWith('ies')) stemmedVariants.add(term.slice(0, -3) + 'y');
+    else if (term.endsWith('es')) stemmedVariants.add(term.slice(0, -2));
+    else if (term.endsWith('s') && !term.endsWith('ss')) stemmedVariants.add(term.slice(0, -1));
+    else stemmedVariants.add(term + 's');
+
+    // Domain inflectional expansions
+    if (term.startsWith('expire') || term === 'expiry') {
+      stemmedVariants.add('expiry');
+      stemmedVariants.add('expire');
+      stemmedVariants.add('expires');
+      stemmedVariants.add('expiration');
+      stemmedVariants.add('expiresat');
+      stemmedVariants.add('expires_at');
+    }
+    if (term.includes('key')) {
+      stemmedVariants.add('key');
+      stemmedVariants.add('keys');
+      stemmedVariants.add('apikey');
+      stemmedVariants.add('api_key');
+      stemmedVariants.add('api-key');
+    }
+    if (term === 'auth' || term.startsWith('authenticat')) {
+      stemmedVariants.add('auth');
+      stemmedVariants.add('authentication');
+      stemmedVariants.add('authorizer');
+    }
+  }
+
+  return {
+    primaryTerms,
+    stemmedVariants: Array.from(stemmedVariants),
+    identifiers,
+    codeTokens: Array.from(subTokens),
+  };
+}
+
+/**
+ * Searches and scores candidate files across the entire indexed repository tree.
+ */
+export function findRelevantFilesFromTree(
+  treeFiles: string[],
+  concepts: ExtractedConcepts,
+  issueBody: string
+): RelevantFile[] {
+  const ignoredPatterns = [
+    'node_modules/', 'dist/', 'build/', '.git/', 'coverage/', '.next/',
+    'vendor/', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'Cargo.lock', 'bun.lock'
+  ];
+
+  const candidatePool = treeFiles.filter((p) => {
+    return !ignoredPatterns.some((ig) => p.includes(ig)) && p.includes('.');
+  });
+
+  const scoredFiles: {
+    path: string;
+    score: number;
+    reason: string;
+    category: RelevantFileCategory;
+    modificationLikely: boolean;
+  }[] = [];
+
+  const architecturalRoles = [
+    'service', 'controller', 'model', 'schema', 'entity', 'router', 'route', 'routes',
+    'repository', 'middleware', 'guard', 'handler', 'dto', 'types', 'migration'
+  ];
+
+  for (const filePath of candidatePool) {
+    const lowerPath = filePath.toLowerCase();
+    const fileName = lowerPath.split('/').pop() || '';
+    const dirPath = lowerPath.includes('/') ? lowerPath.substring(0, lowerPath.lastIndexOf('/')) : '';
+    let score = 0;
+    const matchReasons: string[] = [];
+
+    // Check direct code token matches
+    for (const id of concepts.codeTokens) {
+      if (id.length >= 3 && fileName.includes(id)) {
+        score += 15;
+        matchReasons.push(`File name matches code token '${id}'`);
+      } else if (id.length >= 3 && dirPath.includes(id)) {
+        score += 10;
+        matchReasons.push(`Directory path matches code token '${id}'`);
+      }
+    }
+
+    // Check stemmed concept matches
+    for (const term of concepts.stemmedVariants) {
+      if (term.length >= 3 && (fileName.includes(term) || dirPath.includes(term))) {
+        score += 8;
+        matchReasons.push(`Path matches concept '${term}'`);
+      }
+    }
+
+    // Explicit path match in issue body
+    if (issueBody.includes(fileName) && fileName.length > 4) {
+      score += 25;
+      matchReasons.push(`File explicitly mentioned in issue description`);
+    }
+
+    // Architectural role boost when domain concept matches
+    if (score > 0) {
+      for (const role of architecturalRoles) {
+        if (fileName.includes(role) || dirPath.includes(role)) {
+          score += 6;
+          matchReasons.push(`Matches architectural role '${role}'`);
+          break;
+        }
+      }
+    }
+
+    if (score >= 8) {
+      const isTest = lowerPath.includes('test') || lowerPath.includes('spec') || lowerPath.includes('__tests__');
+      const isDoc = lowerPath.endsWith('.md');
+      const isConfig = lowerPath.includes('config') || lowerPath.includes('schema.prisma') || lowerPath.includes('migration');
+      const isDtoOrType = lowerPath.includes('.dto.') || lowerPath.includes('.type.') || lowerPath.includes('/types/');
+
+      let category: RelevantFileCategory = 'PRIMARY';
+      let modificationLikely = true;
+
+      if (isTest) {
+        category = 'TEST';
+        modificationLikely = false;
+      } else if (isDoc) {
+        category = 'DOCUMENTATION';
+        modificationLikely = false;
+      } else if (isConfig) {
+        category = 'CONFIGURATION';
+        modificationLikely = true;
+      } else if (isDtoOrType) {
+        category = 'SUPPORTING';
+        modificationLikely = true;
+      }
+
+      scoredFiles.push({
+        path: filePath,
+        score,
+        reason: matchReasons.slice(0, 3).join('; ') || 'Path semantic correlation with issue concepts.',
+        category,
+        modificationLikely,
+      });
+    }
+  }
+
+  // Sort by score descending and take top grounded candidates
+  scoredFiles.sort((a, b) => b.score - a.score);
+
+  return scoredFiles.slice(0, 8).map((f) => ({
+    path: f.path,
+    category: f.category,
+    reason: f.reason,
+    confidence: f.score >= 20 ? 'HIGH' : f.score >= 12 ? 'MEDIUM' : 'LOW',
+    modificationLikely: f.modificationLikely,
+  }));
+}
 
 export class IssueAnalysisService {
   private aiClient: GoogleGenAI | null = null;
@@ -158,9 +382,16 @@ export class IssueAnalysisService {
       inferredRequirements.push(`Maintain strict TypeScript type safety with zero type errors.`);
     }
 
+    // 2. Dynamic Issue Concept Extraction
+    const concepts = extractDynamicConcepts(issueTitle, issueBody);
+
     // Detect mentioned files in issue text
-    const sampleTree = repositoryIntelligence.sampleTreeFiles || [];
-    for (const treePath of sampleTree) {
+    const allTree =
+      repositoryIntelligence.allTreeFiles && repositoryIntelligence.allTreeFiles.length > 0
+        ? repositoryIntelligence.allTreeFiles
+        : repositoryIntelligence.sampleTreeFiles || [];
+
+    for (const treePath of allTree) {
       const fileName = treePath.split('/').pop() || '';
       if (fileName && fileName.length > 3 && fullText.includes(fileName)) {
         filesMentioned.push(treePath);
@@ -168,73 +399,35 @@ export class IssueAnalysisService {
     }
 
     // Detect mentioned contracts/APIs/endpoints
-    const contractMatches = fullText.match(/(0x[a-fA-F0-9]{40}|C[A-Z0-9]{55}|[A-Z0-9_]{6,}_ADDRESS|[A-Z0-9_]{6,}_URL)/g);
+    const contractMatches = fullText.match(
+      /(0x[a-fA-F0-9]{40}|C[A-Z0-9]{55}|[A-Z0-9_]{6,}_ADDRESS|[A-Z0-9_]{6,}_URL)/g
+    );
     if (contractMatches) {
       apisMentioned.push(...Array.from(new Set(contractMatches)));
     }
 
-    // 2. Identify Relevant Files from Repository Tree
-    const relevantFiles: RelevantFile[] = [];
-    const matchedPaths = new Set<string>();
+    // 3. Relevant File Discovery across Entire Tree
+    const relevantFiles: RelevantFile[] = findRelevantFilesFromTree(
+      allTree,
+      concepts,
+      issueBody
+    );
 
-    // A. Add explicitly mentioned files
+    // Add explicitly mentioned files if not already present
     for (const f of filesMentioned) {
-      matchedPaths.add(f);
-      const isTest = f.includes('test') || f.includes('spec');
-      relevantFiles.push({
-        path: f,
-        category: isTest ? 'TEST' : 'PRIMARY',
-        reason: 'Explicitly referenced in issue specification or stack trace.',
-        confidence: 'HIGH',
-        modificationLikely: !isTest,
-      });
-    }
-
-    // B. Heuristically match keyword in path
-    const titleKeywords = issueTitle
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, ' ')
-      .split(' ')
-      .filter((w) => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'when'].includes(w));
-
-    for (const treePath of sampleTree) {
-      if (matchedPaths.has(treePath)) continue;
-      const lowerPath = treePath.toLowerCase();
-
-      // Check keyword match
-      const matchedKw = titleKeywords.find((kw) => lowerPath.includes(kw));
-      if (matchedKw) {
-        matchedPaths.add(treePath);
-        const isTest = lowerPath.includes('test') || lowerPath.includes('spec');
-        const isDoc = lowerPath.endsWith('.md');
-        const isConfig = lowerPath.includes('config') || lowerPath.includes('json');
-
-        relevantFiles.push({
-          path: treePath,
-          category: isTest ? 'TEST' : isDoc ? 'DOCUMENTATION' : isConfig ? 'CONFIGURATION' : 'PRIMARY',
-          reason: `Path matches issue keyword "${matchedKw}".`,
-          confidence: 'MEDIUM',
-          modificationLikely: !isDoc && !isTest,
+      if (!relevantFiles.some((rf) => rf.path === f)) {
+        const isTest = f.includes('test') || f.includes('spec');
+        relevantFiles.unshift({
+          path: f,
+          category: isTest ? 'TEST' : 'PRIMARY',
+          reason: 'Explicitly referenced in issue specification or stack trace.',
+          confidence: 'HIGH',
+          modificationLikely: !isTest,
         });
       }
     }
 
-    // C. Always include configuration/test anchors if needed
-    if (relevantFiles.length === 0) {
-      // Pick first source and test files
-      const firstSrc = sampleTree.find((p) => p.startsWith('src/') || p.startsWith('lib/'));
-      if (firstSrc) {
-        relevantFiles.push({
-          path: firstSrc,
-          category: 'PRIMARY',
-          reason: 'Entry candidate in relevant source directory.',
-          confidence: 'LOW',
-          modificationLikely: true,
-        });
-      }
-    }
-
-    // 3. Build Acceptance Criteria (AC-01...)
+    // 4. Build Acceptance Criteria (AC-01...)
     const acceptanceCriteria: AcceptanceCriterion[] = [];
     let acCounter = 1;
 
@@ -243,7 +436,11 @@ export class IssueAnalysisService {
         id: `AC-${String(acCounter++).padStart(2, '0')}`,
         description: req,
         source: 'ISSUE',
-        type: /test/i.test(req) ? 'TEST' : /ui|display|screen|button|color/i.test(req) ? 'UX' : 'FUNCTIONAL',
+        type: /test/i.test(req)
+          ? 'TEST'
+          : /ui|display|screen|button|color/i.test(req)
+          ? 'UX'
+          : 'FUNCTIONAL',
         verificationStrategy: /test/i.test(req)
           ? 'Execute relevant test suite to verify functionality.'
           : 'Inspect affected component and verify behavioral change.',
@@ -257,7 +454,9 @@ export class IssueAnalysisService {
         description: `Run ${dependencyConfig.testFramework} test suite covering modified routines.`,
         source: 'EXISTING_TEST',
         type: 'TEST',
-        verificationStrategy: `Execute local test command: ${dependencyConfig.testFramework === 'Vitest' ? 'npm run test / vitest run' : 'npm test'}`,
+        verificationStrategy: `Execute local test command: ${
+          dependencyConfig.testFramework === 'Vitest' ? 'npm run test / vitest run' : 'npm test'
+        }`,
         confidence: 'HIGH',
       });
     }
@@ -273,36 +472,65 @@ export class IssueAnalysisService {
       });
     }
 
-    // 4. Blocker Detection
+    // 5. Blocker & Risk Detection
     const blockers: BlockerItem[] = [];
 
-    // Category: REPOSITORY_ACCESS_LIMITATION
+    // Plan Quality Gate: Check if code changes are required but zero evidence-backed targets were found
+    if (relevantFiles.length === 0) {
+      blockers.push({
+        id: 'blocker-insufficient-code-context',
+        category: 'INSUFFICIENT_CODE_CONTEXT',
+        description:
+          'Repository inspection succeeded, but zero evidence-backed implementation targets could be identified in the repository tree for this issue.',
+        evidence: `Scanned repository tree (${allTree.length} files) with dynamic issue concepts [${concepts.primaryTerms
+          .slice(0, 8)
+          .join(', ')}], but found no matching candidate files.`,
+        impact:
+          'Plan generation stopped. A confident implementation plan cannot be constructed without grounded target files.',
+        recommendedNextAction:
+          'Review repository structure, provide relevant file paths or module references in the issue description, or confirm the repository branch.',
+      });
+    }
+
+    // Informational future execution constraint (NOT a blocker for v0.3 analysis)
     if (repositoryAccessStatus !== 'app_authorized') {
       blockers.push({
         id: 'blocker-repo-access',
         category: 'REPOSITORY_ACCESS_LIMITATION',
-        description: `Repository "${repositoryIntelligence.owner}/${repositoryIntelligence.repo}" is public-readable, but write access is not authorized through the COSInput GitHub App.`,
-        evidence: 'Repository not listed in active GitHub App installations.',
-        impact: 'COSInput can inspect specifications and analyze files, but cannot push branches or open Pull Requests until authorized.',
-        recommendedNextAction: 'Install the COSInput GitHub App on this repository or obtain fork authorization from the repository maintainer.',
+        description: `Repository "${repositoryIntelligence.owner}/${repositoryIntelligence.repo}" is public-readable. Write operations are not enabled in v0.3.`,
+        evidence:
+          'Repository not installed in active GitHub App installations. Public read access active.',
+        impact:
+          'Public repository analysis is available. Repository write operations are not enabled in v0.3. Future contribution execution will determine the appropriate contributor fork and authorization path.',
+        recommendedNextAction:
+          'Proceed with read-only repository inspection and plan verification. No maintainer action required for v0.3.',
       });
     }
 
     // Category: MISSING_CANONICAL_INFORMATION
-    // Check if issue mentions unconfigured contract addresses, private APIs, or missing credentials
-    if (fullText.includes('<CONTRACT_ADDRESS>') || fullText.includes('TODO: add address') || fullText.includes('REPLACE_WITH_KEY')) {
+    if (
+      fullText.includes('<CONTRACT_ADDRESS>') ||
+      fullText.includes('TODO: add address') ||
+      fullText.includes('REPLACE_WITH_KEY')
+    ) {
       blockers.push({
         id: 'blocker-missing-canonical',
         category: 'MISSING_CANONICAL_INFORMATION',
-        description: 'Required canonical contract address or deployment identifier is missing from issue specification.',
+        description:
+          'Required canonical contract address or deployment identifier is missing from issue specification.',
         evidence: 'Placeholder identifier detected in issue description.',
-        impact: 'Implementation cannot generate deterministic transaction calls without canonical contract identity.',
-        recommendedNextAction: 'Request maintainer clarification for the canonical deployed contract address.',
+        impact:
+          'Implementation cannot generate deterministic transaction calls without canonical contract identity.',
+        recommendedNextAction:
+          'Request maintainer clarification for the canonical deployed contract address.',
       });
     }
 
     // Check if ambiguous questions remain
-    if (fullText.toLowerCase().includes('tbd') || fullText.toLowerCase().includes('needs discussion')) {
+    if (
+      fullText.toLowerCase().includes('tbd') ||
+      fullText.toLowerCase().includes('needs discussion')
+    ) {
       unknownsAndQuestions.push('Issue indicates requirements are still TBD or under discussion.');
       blockers.push({
         id: 'blocker-ambiguous-req',
@@ -314,18 +542,25 @@ export class IssueAnalysisService {
       });
     }
 
-    // 5. Structure Proposed Changes (mapped back to ACs)
-    const proposedChanges = relevantFiles
-      .filter((f) => f.modificationLikely)
-      .slice(0, 5)
-      .map((f, idx) => ({
-        id: `change-${idx + 1}`,
-        targetFile: f.path,
-        description: `Apply updates to resolve issue requirements in ${f.path}.`,
-        mappedAcceptanceCriteriaIds: [acceptanceCriteria[0]?.id || 'AC-01'],
-      }));
+    // Critical Quality Gate: Only HARD blockers prevent PLAN_READY status
+    // Write access limitation is an informational future execution constraint and does NOT block v0.3 analysis.
+    const hardBlockers = blockers.filter((b) => b.category !== 'REPOSITORY_ACCESS_LIMITATION');
+    const isBlocked = hardBlockers.length > 0;
 
-    if (proposedChanges.length === 0 && relevantFiles.length > 0) {
+    // 6. Structure Proposed Changes (mapped back to ACs)
+    const proposedChanges = isBlocked
+      ? []
+      : relevantFiles
+          .filter((f) => f.modificationLikely)
+          .slice(0, 5)
+          .map((f, idx) => ({
+            id: `change-${idx + 1}`,
+            targetFile: f.path,
+            description: `Apply updates to resolve issue requirements in ${f.path}.`,
+            mappedAcceptanceCriteriaIds: [acceptanceCriteria[0]?.id || 'AC-01'],
+          }));
+
+    if (!isBlocked && proposedChanges.length === 0 && relevantFiles.length > 0) {
       proposedChanges.push({
         id: 'change-1',
         targetFile: relevantFiles[0].path,
@@ -334,26 +569,46 @@ export class IssueAnalysisService {
       });
     }
 
-    // 6. Implementation Plan
-    const isSmall = relevantFiles.length <= 2 && explicitRequirements.length <= 2;
-    const isLarge = relevantFiles.length > 6 || explicitRequirements.length > 5;
-    const estimatedChangeSurface = isSmall ? 'SMALL' : isLarge ? 'LARGE' : 'MEDIUM';
+    // 7. Change Surface Recalculation:
+    // Do NOT calculate SMALL/MEDIUM/LARGE until relevant files and proposed changes have been grounded!
+    let estimatedChangeSurface: 'SMALL' | 'MEDIUM' | 'LARGE' | 'UNSPECIFIED';
+    if (isBlocked || proposedChanges.length === 0 || relevantFiles.length === 0) {
+      estimatedChangeSurface = 'UNSPECIFIED';
+    } else if (proposedChanges.length <= 2 && acceptanceCriteria.length <= 4) {
+      estimatedChangeSurface = 'SMALL';
+    } else if (proposedChanges.length <= 5 && acceptanceCriteria.length <= 8) {
+      estimatedChangeSurface = 'MEDIUM';
+    } else {
+      estimatedChangeSurface = 'LARGE';
+    }
 
     const implementationPlan: ImplementationPlan = {
-      issueSummary: `Issue #${issueNumber}: ${issueTitle}`,
+      issueSummary: `Issue #${issueNumber}: ${issueTitle}${
+        isBlocked ? ' (Blocked: Insufficient Code Context / Missing Info)' : ''
+      }`,
       repositoryUnderstanding: `Repository ${repositoryIntelligence.owner}/${repositoryIntelligence.repo} (${dependencyConfig.language}, ${dependencyConfig.framework}) with ${dependencyConfig.testFramework} test tooling.`,
       proposedChanges,
-      testsToRun: dependencyConfig.testFramework !== 'None detected' ? [`npm test / ${dependencyConfig.testFramework}`] : ['Unit test suite'],
+      testsToRun:
+        dependencyConfig.testFramework !== 'None detected'
+          ? [`npm test / ${dependencyConfig.testFramework}`]
+          : ['Unit test suite'],
       buildLintVerification: [
-        dependencyConfig.lintTooling !== 'None detected' ? `Lint check (${dependencyConfig.lintTooling})` : 'Static code inspection',
-        dependencyConfig.language === 'TypeScript' ? 'TypeScript compiler check (tsc --noEmit)' : 'Build verification',
+        dependencyConfig.lintTooling !== 'None detected'
+          ? `Lint check (${dependencyConfig.lintTooling})`
+          : 'Static code inspection',
+        dependencyConfig.language === 'TypeScript'
+          ? 'TypeScript compiler check (tsc --noEmit)'
+          : 'Build verification',
       ],
       risks: [
+        'Public repository analysis is available. Repository write operations are not enabled in v0.3. Future contribution execution will determine the appropriate contributor fork and authorization path.',
         'Changes must preserve backward compatibility with existing interfaces.',
-        'External API or public contract changes require maintainer signoff.',
       ],
       blockers: blockers.map((b) => `[${b.category}] ${b.description}`),
-      outOfScopeItems: outOfScopeItems.length > 0 ? outOfScopeItems : ['Major architectural refactoring', 'Unrelated dependency upgrades'],
+      outOfScopeItems:
+        outOfScopeItems.length > 0
+          ? outOfScopeItems
+          : ['Major architectural refactoring', 'Unrelated dependency upgrades'],
       estimatedChangeSurface,
     };
 
@@ -380,7 +635,7 @@ export class IssueAnalysisService {
       relevantFiles,
       blockers,
       implementationPlan,
-      isBlocked: blockers.length > 0,
+      isBlocked,
     };
   }
 
@@ -409,6 +664,12 @@ export class IssueAnalysisService {
       dependencyConfig,
       repositoryAccessStatus,
     } = params;
+
+    const base = this.runGroundedSemanticAnalysis(params);
+    if (base.isBlocked) {
+      // If grounded semantic quality gate failed, do not let AI bypass the blocker
+      return base;
+    }
 
     const systemPrompt = `You are the COSInput Foundation Repository & Issue Analysis Engine.
 Analyze the provided real GitHub issue grounded strictly in the repository tree, metadata, and instructions.
@@ -452,26 +713,24 @@ CRITICAL INVARIANTS:
     const text = response.text || '';
     const parsed = JSON.parse(text);
 
-    // Merge with deterministic safety checks (e.g. repository access blocker)
-    const base = this.runGroundedSemanticAnalysis(params);
-
     return {
       issueIntelligence: {
         ...base.issueIntelligence,
         ...(parsed.issueIntelligence || {}),
       },
-      acceptanceCriteria: Array.isArray(parsed.acceptanceCriteria) && parsed.acceptanceCriteria.length > 0
-        ? parsed.acceptanceCriteria
-        : base.acceptanceCriteria,
-      relevantFiles: Array.isArray(parsed.relevantFiles) && parsed.relevantFiles.length > 0
-        ? parsed.relevantFiles
-        : base.relevantFiles,
-      blockers: [
-        ...base.blockers.filter((b) => b.category === 'REPOSITORY_ACCESS_LIMITATION'),
-        ...(Array.isArray(parsed.blockers) ? parsed.blockers : []),
-      ],
-      implementationPlan: parsed.implementationPlan || base.implementationPlan,
-      isBlocked: base.blockers.length > 0 || (Array.isArray(parsed.blockers) && parsed.blockers.length > 0),
+      acceptanceCriteria:
+        Array.isArray(parsed.acceptanceCriteria) && parsed.acceptanceCriteria.length > 0
+          ? parsed.acceptanceCriteria
+          : base.acceptanceCriteria,
+      relevantFiles:
+        base.relevantFiles.length > 0
+          ? base.relevantFiles
+          : Array.isArray(parsed.relevantFiles)
+          ? parsed.relevantFiles
+          : [],
+      blockers: base.blockers,
+      implementationPlan: base.implementationPlan,
+      isBlocked: base.isBlocked,
     };
   }
 }

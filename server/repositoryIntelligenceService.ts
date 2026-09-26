@@ -162,7 +162,8 @@ export class RepositoryIntelligenceService {
       relevantSourceDirs,
       relevantTestDirs,
       totalTreeFilesCount: blobPaths.length,
-      sampleTreeFiles: blobPaths.slice(0, 50),
+      sampleTreeFiles: blobPaths.slice(0, 100),
+      allTreeFiles: blobPaths,
     };
 
     return {
@@ -245,7 +246,7 @@ export class RepositoryIntelligenceService {
     allBlobPaths: string[],
     workflowFiles: string[]
   ): DependencyConfigAnalysis {
-    let framework = 'Unknown';
+    let framework = 'None / framework-agnostic';
     let language = 'Unknown';
     let packageManager = 'Unknown';
     let runtime = 'Node.js';
@@ -270,11 +271,44 @@ export class RepositoryIntelligenceService {
         const deps = { ...pkg.dependencies, ...pkg.devDependencies };
         const depKeys = Object.keys(deps);
 
-        if (depKeys.includes('react')) framework = 'React';
-        else if (depKeys.includes('vue')) framework = 'Vue.js';
-        else if (depKeys.includes('next')) framework = 'Next.js';
-        else if (depKeys.includes('express')) framework = 'Express';
-        else if (depKeys.includes('@angular/core')) framework = 'Angular';
+        // Comprehensive backend and frontend framework detection
+        if (depKeys.includes('@nestjs/core') || depKeys.includes('@nestjs/common')) {
+          framework = 'NestJS';
+        } else if (depKeys.includes('fastify')) {
+          framework = 'Fastify';
+        } else if (depKeys.includes('koa')) {
+          framework = 'Koa';
+        } else if (depKeys.includes('hono')) {
+          framework = 'Hono';
+        } else if (depKeys.includes('express')) {
+          framework = 'Express';
+        } else if (depKeys.includes('@adonisjs/core')) {
+          framework = 'AdonisJS';
+        } else if (depKeys.includes('elysia')) {
+          framework = 'Elysia';
+        } else if (depKeys.includes('@trpc/server')) {
+          framework = 'tRPC';
+        } else if (depKeys.includes('next')) {
+          framework = 'Next.js';
+        } else if (depKeys.includes('nuxt')) {
+          framework = 'Nuxt';
+        } else if (depKeys.includes('@remix-run/react') || depKeys.includes('@remix-run/node')) {
+          framework = 'Remix';
+        } else if (depKeys.includes('@sveltejs/kit')) {
+          framework = 'SvelteKit';
+        } else if (depKeys.includes('astro')) {
+          framework = 'Astro';
+        } else if (depKeys.includes('react')) {
+          framework = 'React';
+        } else if (depKeys.includes('vue')) {
+          framework = 'Vue.js';
+        } else if (depKeys.includes('@angular/core')) {
+          framework = 'Angular';
+        } else if (depKeys.includes('svelte')) {
+          framework = 'Svelte';
+        } else {
+          framework = 'None / framework-agnostic';
+        }
 
         if (depKeys.includes('typescript') || allBlobPaths.some((p) => p.endsWith('.ts') || p.endsWith('.tsx'))) {
           language = 'TypeScript';
@@ -285,6 +319,7 @@ export class RepositoryIntelligenceService {
         if (depKeys.includes('vitest')) testFramework = 'Vitest';
         else if (depKeys.includes('jest')) testFramework = 'Jest';
         else if (depKeys.includes('mocha')) testFramework = 'Mocha';
+        else if (depKeys.includes('@playwright/test')) testFramework = 'Playwright';
 
         if (depKeys.includes('eslint')) lintTooling = 'ESLint';
         if (depKeys.includes('biome') || depKeys.includes('@biomejs/biome')) lintTooling = 'Biome';
@@ -292,8 +327,9 @@ export class RepositoryIntelligenceService {
         if (depKeys.includes('vite')) buildTooling = 'Vite';
         else if (depKeys.includes('webpack')) buildTooling = 'Webpack';
         else if (depKeys.includes('esbuild')) buildTooling = 'esbuild';
+        else if (depKeys.includes('tsup')) buildTooling = 'tsup';
 
-        majorDependencies.push(...depKeys.slice(0, 15));
+        majorDependencies.push(...depKeys.slice(0, 20));
       } catch {
         // Ignore
       }
@@ -303,11 +339,16 @@ export class RepositoryIntelligenceService {
       runtime = 'Rust Native';
       buildTooling = 'cargo build';
       testFramework = 'cargo test';
+      if (allBlobPaths.some((p) => p.includes('actix'))) framework = 'Actix-web';
+      else if (allBlobPaths.some((p) => p.includes('axum'))) framework = 'Axum';
+      else if (allBlobPaths.some((p) => p.includes('rocket'))) framework = 'Rocket';
+      else framework = 'None / framework-agnostic';
     } else if (allBlobPaths.some((p) => p.endsWith('pyproject.toml') || p.endsWith('requirements.txt'))) {
       language = 'Python';
       packageManager = 'pip / poetry';
       runtime = 'Python 3';
       testFramework = 'pytest';
+      framework = 'None / framework-agnostic';
     }
 
     // Inspect .env.example for required external configuration

@@ -291,7 +291,8 @@ export type BlockerCategory =
   | 'UNSUPPORTED_PROJECT_STRUCTURE'
   | 'RATE_LIMIT'
   | 'AUTHENTICATION_FAILURE'
-  | 'AUTHORIZATION_FAILURE';
+  | 'AUTHORIZATION_FAILURE'
+  | 'INSUFFICIENT_CODE_CONTEXT';
 
 export interface BlockerItem {
   id: string;
@@ -370,7 +371,7 @@ export interface ImplementationPlan {
   risks: string[];
   blockers: string[];
   outOfScopeItems: string[];
-  estimatedChangeSurface: 'SMALL' | 'MEDIUM' | 'LARGE';
+  estimatedChangeSurface: 'SMALL' | 'MEDIUM' | 'LARGE' | 'UNSPECIFIED';
 }
 
 export interface RepositoryIntelligenceData {
@@ -389,6 +390,7 @@ export interface RepositoryIntelligenceData {
   relevantTestDirs: string[];
   totalTreeFilesCount: number;
   sampleTreeFiles: string[];
+  allTreeFiles?: string[];
 }
 
 export interface ActivityTimelineItem {

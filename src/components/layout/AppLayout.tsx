@@ -16,11 +16,11 @@ export const AppLayout: React.FC = () => {
       />
 
       {/* Main Canvas Area shifted 64 (16rem) on desktop */}
-      <div className="lg:pl-64 flex flex-col min-h-screen">
+      <div className="lg:pl-64 flex flex-col min-h-screen min-w-0">
         <Header onOpenMobileMenu={() => setMobileMenuOpen(true)} />
         <DemoModeBanner />
 
-        <main className="w-full flex-1 bg-surface">
+        <main className="w-full flex-1 bg-surface min-w-0">
           <Outlet />
         </main>
       </div>
