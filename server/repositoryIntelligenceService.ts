@@ -256,12 +256,16 @@ export class RepositoryIntelligenceService {
     let buildTooling = 'None detected';
     let ciSystem = workflowFiles.length > 0 ? 'GitHub Actions' : 'None detected';
     const externalConfiguration: ExternalConfigurationItem[] = [];
+    let scripts: Record<string, string> = {};
 
     // Parse package.json if present
     const pkgContent = rawFiles['package.json'];
     if (pkgContent) {
       try {
         const pkg = JSON.parse(pkgContent);
+        if (pkg.scripts && typeof pkg.scripts === 'object') {
+          scripts = { ...pkg.scripts };
+        }
         packageManager = allBlobPaths.includes('pnpm-lock.yaml')
           ? 'pnpm'
           : allBlobPaths.includes('yarn.lock')
@@ -385,6 +389,7 @@ export class RepositoryIntelligenceService {
       buildTooling,
       ciSystem,
       externalConfiguration,
+      scripts,
     };
   }
 

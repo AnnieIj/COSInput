@@ -680,7 +680,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       `Scanning repository tree, instruction files (AGENTS.md, CONTRIBUTING.md), and configuration.`
     );
 
-    const { repositoryIntelligence, dependencyConfig } =
+    const { repositoryIntelligence, dependencyConfig, rawFiles } =
       await repositoryIntelligenceService.inspectRepository(
         session.repositoryOwner,
         session.repositoryName
@@ -701,6 +701,22 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       dependenciesAndConfig: dependencyConfig,
     });
 
+    const fetchFileContent = async (filePath: string): Promise<string> => {
+      try {
+        const fileRes = await githubServerClient.getFileContent(
+          null,
+          session.repositoryOwner,
+          session.repositoryName,
+          filePath,
+          repositoryIntelligence.defaultBranch,
+          userAuthStore.getUserToken() || undefined
+        );
+        return fileRes.content || '';
+      } catch {
+        return '';
+      }
+    };
+
     // 5. Run Issue Analysis & Acceptance Criteria Engine & Blocker Detection
     const analysisResult = await issueAnalysisService.analyzeIssue({
       issueNumber: session.issueNumber,
@@ -710,6 +726,8 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       repositoryIntelligence,
       dependencyConfig,
       repositoryAccessStatus: session.repositoryAccessStatus,
+      rawFiles,
+      fetchFileContent,
     });
 
     contributionSessionStore.addTimelineEvent(

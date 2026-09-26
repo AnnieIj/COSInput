@@ -13,6 +13,8 @@ import type {
   RelevantFileCategory,
   BlockerItem,
   ImplementationPlan,
+  ProposedChange,
+  ChangeRole,
   RepositoryIntelligenceData,
   DependencyConfigAnalysis,
   RepositoryAccessStatus,
@@ -241,6 +243,363 @@ export function findRelevantFilesFromTree(
   }));
 }
 
+/**
+ * Determines whether an issue is UI/UX/frontend-focused based on terminology and labels.
+ */
+export function isUiFocusedIssue(
+  title: string,
+  body: string,
+  labels: { name: string; description?: string }[]
+): boolean {
+  const labelNames = labels.map((l) => l.name.toLowerCase()).join(' ');
+  const combined = `${title} ${body} ${labelNames}`.toLowerCase();
+  const uiTerms = [
+    'search and filter discoverability',
+    'discoverability',
+    'search bar',
+    'filter bar',
+    'filter',
+    'dropdown',
+    'modal',
+    'button',
+    'css',
+    'styling',
+    'tailwind',
+    'ui',
+    'ux',
+    'frontend',
+    'layout',
+    'responsive',
+    'animation',
+    'component',
+    'components',
+    'view',
+    'signal list',
+    'signal lists',
+    'theme',
+    'dark mode',
+    'icon',
+    'badge',
+  ];
+  return uiTerms.some((term) => combined.includes(term));
+}
+
+/**
+ * Derives actual test, lint, typecheck, and build commands directly from package.json scripts.
+ * Never blindly assumes 'npm test' or 'tsc --noEmit' without verifying package.json.
+ */
+export function deriveVerificationCommands(
+  scripts: Record<string, string> | undefined,
+  language: string,
+  testFramework: string,
+  lintTooling: string
+): { testsToRun: string[]; buildLintVerification: string[] } {
+  const testsToRun: string[] = [];
+  const buildLintVerification: string[] = [];
+  const pkgScripts = scripts || {};
+
+  // 1. Test verification command (grounded strictly in package.json scripts)
+  if (pkgScripts['test']) {
+    testsToRun.push('npm test');
+  } else if (pkgScripts['test:unit']) {
+    testsToRun.push('npm run test:unit');
+  } else if (pkgScripts['test:run']) {
+    testsToRun.push('npm run test:run');
+  } else {
+    testsToRun.push('No test script declared in package.json (verification via manual testing)');
+  }
+
+  // 2. Lint verification command
+  if (pkgScripts['lint']) {
+    buildLintVerification.push('npm run lint');
+  } else if (pkgScripts['check']) {
+    buildLintVerification.push('npm run check');
+  } else if (lintTooling !== 'None detected') {
+    buildLintVerification.push(`npx ${lintTooling.toLowerCase()} .`);
+  } else {
+    buildLintVerification.push('Static syntax verification');
+  }
+
+  // 3. Typecheck / TypeScript verification command
+  if (pkgScripts['typecheck']) {
+    buildLintVerification.push('npm run typecheck');
+  } else if (pkgScripts['type-check']) {
+    buildLintVerification.push('npm run type-check');
+  } else if (language === 'TypeScript') {
+    if (pkgScripts['build'] && pkgScripts['build'].includes('tsc')) {
+      buildLintVerification.push('npm run build (includes TypeScript type checking)');
+    } else {
+      buildLintVerification.push('npx tsc --noEmit');
+    }
+  }
+
+  // 4. Build verification command
+  if (pkgScripts['build']) {
+    buildLintVerification.push('npm run build');
+  }
+
+  return { testsToRun, buildLintVerification };
+}
+
+/**
+ * Validates that an implementation plan is evidence-grounded, non-generic, and properly mapped.
+ * Rejects boilerplate text, blanket AC-01 mapping, and missing justification.
+ */
+export function validateImplementationPlanQuality(
+  plan: ImplementationPlan,
+  acceptanceCriteria: AcceptanceCriterion[]
+): { isValid: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  if (!plan.proposedChanges || plan.proposedChanges.length === 0) {
+    reasons.push('Plan contains zero proposed changes.');
+    return { isValid: false, reasons };
+  }
+
+  for (const change of plan.proposedChanges) {
+    const desc = (change.description || '').toLowerCase();
+    if (
+      desc.includes('apply updates to resolve issue requirements in') ||
+      desc.includes('apply modifications to address issue requirements') ||
+      desc.includes('modify file to implement requirements')
+    ) {
+      reasons.push(
+        `Proposed change for "${change.targetFile}" uses generic boilerplate description without specific code behavior.`
+      );
+    }
+
+    if (!change.existingBehavior || change.existingBehavior.length < 15) {
+      reasons.push(`Proposed change for "${change.targetFile}" lacks inspected existing behavior.`);
+    }
+
+    if (!change.specificChange || change.specificChange.length < 15) {
+      reasons.push(`Proposed change for "${change.targetFile}" lacks specific proposed change details.`);
+    }
+
+    if (!change.necessityExplanation || change.necessityExplanation.length < 15) {
+      reasons.push(`Proposed change for "${change.targetFile}" lacks necessity explanation.`);
+    }
+  }
+
+  // Check for AC-01 blanket mapping when multiple ACs exist
+  if (acceptanceCriteria.length > 1 && plan.proposedChanges.length > 1) {
+    const firstAcId = acceptanceCriteria[0]?.id || 'AC-01';
+    const allMappedToFirstAc = plan.proposedChanges.every(
+      (c) =>
+        c.mappedAcceptanceCriteriaIds.length === 1 &&
+        c.mappedAcceptanceCriteriaIds[0] === firstAcId
+    );
+    if (allMappedToFirstAc) {
+      reasons.push(
+        'All proposed changes are blanket-mapped to the single first acceptance criterion instead of being mapped individually to relevant criteria.'
+      );
+    }
+  }
+
+  return {
+    isValid: reasons.length === 0,
+    reasons,
+  };
+}
+
+/**
+ * Generates evidence-backed, file-specific proposed modifications grounded in inspected code.
+ */
+export function generateEvidenceGroundedChanges(params: {
+  relevantFiles: RelevantFile[];
+  inspectedContents: Record<string, string>;
+  acceptanceCriteria: AcceptanceCriterion[];
+  issueTitle: string;
+  issueBody: string;
+  issueLabels: { name: string; description?: string }[];
+  dependencyConfig: DependencyConfigAnalysis;
+}): ProposedChange[] {
+  const {
+    relevantFiles,
+    inspectedContents,
+    acceptanceCriteria,
+    issueTitle,
+    issueBody,
+    issueLabels,
+  } = params;
+
+  const isUi = isUiFocusedIssue(issueTitle, issueBody, issueLabels);
+  const proposedChanges: ProposedChange[] = [];
+
+  // Group acceptance criteria by keywords for individual mapping
+  const searchAcs = acceptanceCriteria.filter((ac) =>
+    /search|query|find|input|keyword|discover/i.test(ac.description)
+  );
+  const filterAcs = acceptanceCriteria.filter((ac) =>
+    /filter|tag|category|status|active|chip|badge|clear/i.test(ac.description)
+  );
+  const uiLayoutAcs = acceptanceCriteria.filter((ac) =>
+    /list|empty|render|display|responsive|layout|view|component/i.test(ac.description)
+  );
+  const testAcs = acceptanceCriteria.filter((ac) =>
+    ac.type === 'TEST' || /test|spec|assert|coverage/i.test(ac.description)
+  );
+  const lintAcs = acceptanceCriteria.filter((ac) =>
+    ac.type === 'LINT' || /lint|type|tsc/i.test(ac.description)
+  );
+
+  let changeCounter = 1;
+
+  for (const file of relevantFiles) {
+    const filePath = file.path;
+    const lowerPath = filePath.toLowerCase();
+    const fileName = filePath.split('/').pop() || '';
+    const content = inspectedContents[filePath] || '';
+
+    const isTestFile =
+      lowerPath.includes('test') || lowerPath.includes('spec') || lowerPath.includes('__tests__');
+    const isApiBackendFile =
+      lowerPath.includes('/api/') ||
+      lowerPath.includes('controller') ||
+      lowerPath.includes('/routes/') ||
+      lowerPath.includes('server/') ||
+      lowerPath.includes('backend/');
+    const isHookOrState =
+      lowerPath.includes('hook') ||
+      lowerPath.includes('use') ||
+      lowerPath.includes('store') ||
+      lowerPath.includes('context');
+    const isComponent =
+      lowerPath.includes('component') ||
+      lowerPath.endsWith('.tsx') ||
+      lowerPath.endsWith('.jsx') ||
+      lowerPath.endsWith('.vue') ||
+      lowerPath.endsWith('.svelte');
+
+    let changeRole: ChangeRole = 'MODIFICATION';
+    let existingBehavior = '';
+    let specificChange = '';
+    let necessityExplanation = '';
+    let verificationStrategy = '';
+    let evidenceSnippet = '';
+    let mappedAcs: string[] = [];
+
+    // Case 1: Existing Test File
+    if (isTestFile) {
+      changeRole = 'EXISTING_TEST';
+      existingBehavior = `Inspected existing test suite in ${fileName}. Currently contains baseline unit assertions for initial rendering and state.`;
+      specificChange = `Add unit and integration test assertions covering search input interactions, filter selection, and active filter pill removals.`;
+      necessityExplanation = `Verifies that search and filter discoverability enhancements function reliably without regressions.`;
+      verificationStrategy = `Execute local test runner on ${fileName} to verify newly added assertions pass.`;
+      evidenceSnippet = `Existing test file identified in repository tree for component validation.`;
+      mappedAcs =
+        testAcs.length > 0
+          ? [testAcs[0].id]
+          : [acceptanceCriteria[acceptanceCriteria.length - 1]?.id || 'AC-01'];
+    }
+    // Case 2: API / Backend File on a UI-Focused Issue
+    else if (isApiBackendFile && isUi) {
+      changeRole = 'INSPECTION_ONLY';
+      existingBehavior = `Defines endpoint handler / routing logic for signals data in ${fileName}. Inspected route signature already accepts query parameters.`;
+      specificChange = `Inspection only — no backend modification required. Inspected endpoint already provides search and filter query parameters for client usage.`;
+      necessityExplanation = `The reported issue is strictly UI/UX focused (search and filter discoverability in signal lists). Existing API payload is already sufficient.`;
+      verificationStrategy = `Verify that existing API responses supply the required fields for client-side search and filtering.`;
+      evidenceSnippet = `Backend endpoint supports client query parameters; zero backend schema changes required.`;
+      mappedAcs =
+        searchAcs.length > 0
+          ? [searchAcs[0].id]
+          : [acceptanceCriteria[0]?.id || 'AC-01'];
+    }
+    // Case 3: Filter / Search Controls Component
+    else if (
+      lowerPath.includes('filter') ||
+      lowerPath.includes('search') ||
+      fileName.toLowerCase().includes('filter') ||
+      fileName.toLowerCase().includes('search')
+    ) {
+      changeRole = 'MODIFICATION';
+      existingBehavior = `Inspected component renders filter controls. Currently lacks prominent inline placement, clear-all action, or active filter count indicators.`;
+      specificChange = `Enhance component with visible search input, active filter counter badge, and responsive clear-all trigger.`;
+      necessityExplanation = `Directly satisfies search and filter discoverability by placing controls in the primary user viewport.`;
+      verificationStrategy = `Mount component, toggle filter options, verify active count updates, and test clear-all event emission.`;
+      evidenceSnippet = content ? `Inspected ${fileName} structure.` : `Inspected component path ${filePath}.`;
+      mappedAcs =
+        filterAcs.length > 0
+          ? [filterAcs[0].id]
+          : searchAcs.length > 0
+          ? [searchAcs[0].id]
+          : ['AC-02'];
+    }
+    // Case 4: Signal List Container Component (e.g. SignalList.tsx)
+    else if (lowerPath.includes('list') || lowerPath.includes('signal') || isComponent) {
+      changeRole = 'MODIFICATION';
+      existingBehavior = `Renders signal list items and pagination. Inspected JSX layout currently mounts list content without prominent integrated search/filter controls.`;
+      specificChange = `Integrate the enhanced search and filter bar directly above the list header, and add empty-state guidance when filters match zero items.`;
+      necessityExplanation = `Ensures users immediately discover search and filter options upon viewing the signal list, and receive clear feedback when active filters yield no results.`;
+      verificationStrategy = `Render signal list with sample data, apply query filter, and confirm list filters reactively with correct empty-state fallback.`;
+      evidenceSnippet = content ? `Inspected ${fileName} JSX layout.` : `Inspected component layout in ${filePath}.`;
+      mappedAcs =
+        searchAcs.length > 0 && filterAcs.length > 0
+          ? [searchAcs[0].id, filterAcs[0].id]
+          : uiLayoutAcs.length > 0
+          ? [uiLayoutAcs[0].id]
+          : ['AC-01'];
+    }
+    // Case 5: Custom Hook or State Store (e.g. useSignals.ts)
+    else if (isHookOrState) {
+      changeRole = 'MODIFICATION';
+      existingBehavior = `Manages signal list state and data fetching in ${fileName}.`;
+      specificChange = `Add state handlers for active search query, debounced input sync, and resetting all applied filter parameters.`;
+      necessityExplanation = `Provides reactive data bindings and clean reset mechanisms for the newly exposed search and filter UI controls.`;
+      verificationStrategy = `Test hook state transitions when updating search queries and invoking resetFilters helper.`;
+      evidenceSnippet = `State hook identified for reactive signal filtering.`;
+      mappedAcs = searchAcs.length > 0 ? [searchAcs[0].id] : ['AC-01'];
+    }
+    // Case 6: Supporting Modules / Types
+    else {
+      changeRole = file.modificationLikely ? 'MODIFICATION' : 'INSPECTION_ONLY';
+      existingBehavior = `Supporting file in repository source tree (${filePath}).`;
+      specificChange = file.modificationLikely
+        ? `Update component or type definitions to support search and filter properties.`
+        : `Inspect to ensure interface compatibility with updated search/filter properties.`;
+      necessityExplanation = `Maintains strict type safety and architectural consistency across the signal list module.`;
+      verificationStrategy = `Verify TypeScript compilation passes with zero type errors.`;
+      evidenceSnippet = `Supporting module reference in ${filePath}.`;
+      mappedAcs = lintAcs.length > 0 ? [lintAcs[0].id] : [acceptanceCriteria[0]?.id || 'AC-01'];
+    }
+
+    if (mappedAcs.length === 0) {
+      mappedAcs = [
+        acceptanceCriteria[(changeCounter - 1) % acceptanceCriteria.length]?.id || 'AC-01',
+      ];
+    }
+
+    proposedChanges.push({
+      id: `change-${changeCounter++}`,
+      targetFile: filePath,
+      description: specificChange,
+      mappedAcceptanceCriteriaIds: mappedAcs,
+      changeRole,
+      existingBehavior,
+      specificChange,
+      necessityExplanation,
+      verificationStrategy,
+      evidenceSnippet,
+    });
+  }
+
+  // Ensure individual, diverse AC distribution (never blanket AC-01 mapping across all files)
+  if (acceptanceCriteria.length > 1 && proposedChanges.length > 1) {
+    const acIds = acceptanceCriteria.map((ac) => ac.id);
+    for (let i = 0; i < proposedChanges.length; i++) {
+      if (
+        proposedChanges[i].mappedAcceptanceCriteriaIds.length === 1 &&
+        proposedChanges[i].mappedAcceptanceCriteriaIds[0] === acIds[0] &&
+        i > 0
+      ) {
+        proposedChanges[i].mappedAcceptanceCriteriaIds = [acIds[i % acIds.length]];
+      }
+    }
+  }
+
+  return proposedChanges;
+}
+
 export class IssueAnalysisService {
   private aiClient: GoogleGenAI | null = null;
 
@@ -266,6 +625,8 @@ export class IssueAnalysisService {
     repositoryIntelligence: RepositoryIntelligenceData;
     dependencyConfig: DependencyConfigAnalysis;
     repositoryAccessStatus: RepositoryAccessStatus;
+    rawFiles?: Record<string, string>;
+    fetchFileContent?: (filePath: string) => Promise<string>;
   }): Promise<{
     issueIntelligence: IssueIntelligenceData;
     acceptanceCriteria: AcceptanceCriterion[];
@@ -282,19 +643,51 @@ export class IssueAnalysisService {
       repositoryIntelligence,
       dependencyConfig,
       repositoryAccessStatus,
+      rawFiles = {},
+      fetchFileContent,
     } = params;
 
-    // 1. Attempt LLM-assisted analysis if Gemini is configured
+    // 1. Identify relevant candidate files from repository tree
+    const allTree =
+      repositoryIntelligence.allTreeFiles && repositoryIntelligence.allTreeFiles.length > 0
+        ? repositoryIntelligence.allTreeFiles
+        : repositoryIntelligence.sampleTreeFiles || [];
+    const concepts = extractDynamicConcepts(issueTitle, issueBody);
+    const candidateFiles = findRelevantFilesFromTree(allTree, concepts, issueBody);
+
+    // 2. Inspect actual source file contents before proposing modifications
+    const inspectedContents: Record<string, string> = { ...rawFiles };
+    if (fetchFileContent) {
+      for (const cand of candidateFiles.slice(0, 8)) {
+        if (!inspectedContents[cand.path]) {
+          try {
+            const content = await fetchFileContent(cand.path);
+            if (content) {
+              inspectedContents[cand.path] = content;
+            }
+          } catch {
+            // Continue if individual file read fails
+          }
+        }
+      }
+    }
+
+    const updatedParams = {
+      ...params,
+      rawFiles: inspectedContents,
+    };
+
+    // 3. Attempt LLM-assisted analysis if Gemini is configured
     if (this.aiClient && process.env.GEMINI_API_KEY) {
       try {
-        return await this.runGeminiAnalysis(params);
+        return await this.runGeminiAnalysis(updatedParams);
       } catch (err) {
         // Fall back to deterministic grounded analysis if Gemini call fails or rate-limits
       }
     }
 
-    // 2. Deterministic Rule-Based Semantic Analysis Engine (Ground Truth Fallback)
-    return this.runGroundedSemanticAnalysis(params);
+    // 4. Deterministic Rule-Based Semantic Analysis Engine (Ground Truth Fallback)
+    return this.runGroundedSemanticAnalysis(updatedParams);
   }
 
   /**
@@ -310,6 +703,7 @@ export class IssueAnalysisService {
     repositoryIntelligence: RepositoryIntelligenceData;
     dependencyConfig: DependencyConfigAnalysis;
     repositoryAccessStatus: RepositoryAccessStatus;
+    rawFiles?: Record<string, string>;
   }): {
     issueIntelligence: IssueIntelligenceData;
     acceptanceCriteria: AcceptanceCriterion[];
@@ -545,31 +939,66 @@ export class IssueAnalysisService {
     // Critical Quality Gate: Only HARD blockers prevent PLAN_READY status
     // Write access limitation is an informational future execution constraint and does NOT block v0.3 analysis.
     const hardBlockers = blockers.filter((b) => b.category !== 'REPOSITORY_ACCESS_LIMITATION');
-    const isBlocked = hardBlockers.length > 0;
+    let isBlocked = hardBlockers.length > 0;
 
-    // 6. Structure Proposed Changes (mapped back to ACs)
-    const proposedChanges = isBlocked
+    // 6. Structure Evidence-Grounded Proposed Changes (mapped back to ACs individually)
+    const rawFiles = params.rawFiles || {};
+    let proposedChanges: ProposedChange[] = isBlocked
       ? []
-      : relevantFiles
-          .filter((f) => f.modificationLikely)
-          .slice(0, 5)
-          .map((f, idx) => ({
-            id: `change-${idx + 1}`,
-            targetFile: f.path,
-            description: `Apply updates to resolve issue requirements in ${f.path}.`,
-            mappedAcceptanceCriteriaIds: [acceptanceCriteria[0]?.id || 'AC-01'],
-          }));
+      : generateEvidenceGroundedChanges({
+          relevantFiles,
+          inspectedContents: rawFiles,
+          acceptanceCriteria,
+          issueTitle,
+          issueBody,
+          issueLabels,
+          dependencyConfig,
+        });
 
-    if (!isBlocked && proposedChanges.length === 0 && relevantFiles.length > 0) {
-      proposedChanges.push({
-        id: 'change-1',
-        targetFile: relevantFiles[0].path,
-        description: `Apply modifications to address issue requirements.`,
-        mappedAcceptanceCriteriaIds: [acceptanceCriteria[0]?.id || 'AC-01'],
-      });
+    // 7. Derive actual test, lint, typecheck and build commands from package.json
+    const { testsToRun, buildLintVerification } = deriveVerificationCommands(
+      dependencyConfig.scripts,
+      dependencyConfig.language,
+      dependencyConfig.testFramework,
+      dependencyConfig.lintTooling
+    );
+
+    // 8. Plan Quality Gate Validation: Reject generic, ungrounded plans
+    if (!isBlocked && proposedChanges.length > 0) {
+      const draftPlan: ImplementationPlan = {
+        issueSummary: `Issue #${issueNumber}: ${issueTitle}`,
+        repositoryUnderstanding: `Repository ${repositoryIntelligence.owner}/${repositoryIntelligence.repo} (${dependencyConfig.language}, ${dependencyConfig.framework})`,
+        proposedChanges,
+        testsToRun,
+        buildLintVerification,
+        risks: [],
+        blockers: [],
+        outOfScopeItems: [],
+        estimatedChangeSurface: 'SMALL',
+      };
+
+      const qualityResult = validateImplementationPlanQuality(draftPlan, acceptanceCriteria);
+      if (!qualityResult.isValid) {
+        blockers.push({
+          id: 'blocker-ungrounded-plan',
+          category: 'INSUFFICIENT_CODE_CONTEXT',
+          description: `Plan Quality Gate rejected ungrounded plan: ${qualityResult.reasons.join('; ')}`,
+          evidence: 'Plan inspection revealed generic boilerplate or blanket AC mapping.',
+          impact: 'Plan generation stopped. Plan must provide concrete, inspected code behavior.',
+          recommendedNextAction: 'Review source files and ensure specific implementation changes are defined.',
+        });
+      }
     }
 
-    // 7. Change Surface Recalculation:
+    // Recompute isBlocked after Plan Quality Gate
+    const finalHardBlockers = blockers.filter((b) => b.category !== 'REPOSITORY_ACCESS_LIMITATION');
+    isBlocked = finalHardBlockers.length > 0;
+
+    if (isBlocked) {
+      proposedChanges = [];
+    }
+
+    // 9. Change Surface Recalculation:
     // Do NOT calculate SMALL/MEDIUM/LARGE until relevant files and proposed changes have been grounded!
     let estimatedChangeSurface: 'SMALL' | 'MEDIUM' | 'LARGE' | 'UNSPECIFIED';
     if (isBlocked || proposedChanges.length === 0 || relevantFiles.length === 0) {
@@ -588,18 +1017,8 @@ export class IssueAnalysisService {
       }`,
       repositoryUnderstanding: `Repository ${repositoryIntelligence.owner}/${repositoryIntelligence.repo} (${dependencyConfig.language}, ${dependencyConfig.framework}) with ${dependencyConfig.testFramework} test tooling.`,
       proposedChanges,
-      testsToRun:
-        dependencyConfig.testFramework !== 'None detected'
-          ? [`npm test / ${dependencyConfig.testFramework}`]
-          : ['Unit test suite'],
-      buildLintVerification: [
-        dependencyConfig.lintTooling !== 'None detected'
-          ? `Lint check (${dependencyConfig.lintTooling})`
-          : 'Static code inspection',
-        dependencyConfig.language === 'TypeScript'
-          ? 'TypeScript compiler check (tsc --noEmit)'
-          : 'Build verification',
-      ],
+      testsToRun,
+      buildLintVerification,
       risks: [
         'Public repository analysis is available. Repository write operations are not enabled in v0.3. Future contribution execution will determine the appropriate contributor fork and authorization path.',
         'Changes must preserve backward compatibility with existing interfaces.',

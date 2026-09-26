@@ -617,22 +617,72 @@ export const WorkspacePage: React.FC = () => {
 
                         <div className="divide-y divide-surface-container-low border border-surface-container rounded-xl overflow-hidden">
                           {session.implementationPlan.proposedChanges.map((change) => (
-                            <div key={change.id} className="p-4 bg-surface-container-lowest hover:bg-surface-container-low/40 transition-colors flex flex-col gap-2">
+                            <div
+                              key={change.id}
+                              className="p-4 bg-surface-container-lowest hover:bg-surface-container-low/30 transition-colors flex flex-col gap-2.5"
+                            >
                               <div className="flex items-center justify-between gap-2 flex-wrap">
-                                <span className="font-code-sm text-code-sm font-mono font-bold text-primary">
-                                  {change.targetFile}
-                                </span>
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-code-sm text-code-sm font-mono font-bold text-primary">
+                                    {change.targetFile}
+                                  </span>
+                                  {change.changeRole && (
+                                    <span
+                                      className={`px-2 py-0.5 rounded font-label-caps text-[10px] font-bold ${
+                                        change.changeRole === 'MODIFICATION'
+                                          ? 'bg-primary-container text-on-primary'
+                                          : change.changeRole === 'INSPECTION_ONLY'
+                                          ? 'bg-amber-500/20 text-amber-900 border border-amber-500/30'
+                                          : 'bg-tertiary-container/30 text-tertiary border border-tertiary/40'
+                                      }`}
+                                    >
+                                      {change.changeRole}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 flex-wrap">
                                   {change.mappedAcceptanceCriteriaIds.map((acId) => (
-                                    <span key={acId} className="px-2 py-0.5 rounded bg-primary-fixed text-on-primary-fixed font-code-sm text-[10px] font-bold">
+                                    <span
+                                      key={acId}
+                                      className="px-2 py-0.5 rounded bg-primary-fixed text-on-primary-fixed font-code-sm text-[10px] font-bold"
+                                    >
                                       Maps to {acId}
                                     </span>
                                   ))}
                                 </div>
                               </div>
-                              <p className="font-body-md text-body-md text-secondary">
+
+                              <p className="font-body-md text-body-md text-on-surface font-semibold">
                                 {change.description}
                               </p>
+
+                              {change.existingBehavior && (
+                                <div className="p-2.5 rounded-lg bg-surface-container-low border border-surface-container space-y-0.5 text-body-sm font-body-sm">
+                                  <span className="text-[10px] font-bold text-secondary uppercase tracking-wider block font-mono">
+                                    Inspected Existing Behavior
+                                  </span>
+                                  <p className="text-secondary">{change.existingBehavior}</p>
+                                </div>
+                              )}
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-body-sm font-body-sm">
+                                {change.necessityExplanation && (
+                                  <div className="p-2.5 rounded-lg bg-surface-container-low/70 border border-surface-container text-secondary space-y-0.5">
+                                    <strong className="text-on-surface text-[11px] block font-mono">
+                                      Why Necessary:
+                                    </strong>
+                                    <span>{change.necessityExplanation}</span>
+                                  </div>
+                                )}
+                                {change.verificationStrategy && (
+                                  <div className="p-2.5 rounded-lg bg-surface-container-low/70 border border-surface-container text-secondary space-y-0.5">
+                                    <strong className="text-on-surface text-[11px] block font-mono">
+                                      Verification Strategy:
+                                    </strong>
+                                    <span>{change.verificationStrategy}</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </div>

@@ -247,6 +247,7 @@ export interface DependencyConfigAnalysis {
   buildTooling: string;
   ciSystem: string;
   externalConfiguration: ExternalConfigurationItem[];
+  scripts?: Record<string, string>;
 }
 
 export interface IssueIntelligenceData {
@@ -266,11 +267,23 @@ export interface IssueIntelligenceData {
   outOfScopeItems: string[];
 }
 
+export type ChangeRole =
+  | 'MODIFICATION'
+  | 'INSPECTION_ONLY'
+  | 'EXISTING_TEST'
+  | 'NEW_OR_UPDATED_TEST';
+
 export interface ProposedChange {
   id: string;
   targetFile: string;
   description: string;
   mappedAcceptanceCriteriaIds: string[];
+  changeRole?: ChangeRole;
+  existingBehavior?: string;
+  specificChange?: string;
+  necessityExplanation?: string;
+  verificationStrategy?: string;
+  evidenceSnippet?: string;
 }
 
 export interface ImplementationPlan {

@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { contributionSessionStore } from '../server/contributionSessionStore';
 import { repositoryIntelligenceService } from '../server/repositoryIntelligenceService';
-import { issueAnalysisService } from '../server/issueAnalysisService';
+import { issueAnalysisService, validateImplementationPlanQuality } from '../server/issueAnalysisService';
 import { githubServerClient } from '../server/githubClient';
 import { githubService } from '../src/services/github.service';
 import type {
@@ -769,6 +769,233 @@ The swipe animation stutters when dragging quickly on mobile viewports.
         []
       );
       expect(agnosticConfig.framework).toBe('None / framework-agnostic');
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 8. Evidence-Grounded Implementation Planning & Quality Gate Regressions
+  // --------------------------------------------------------------------------
+  describe('Evidence-Grounded Implementation Planning & Plan Quality Gate', () => {
+    const stellarSwipeTree = [
+      'src/components/SignalList.tsx',
+      'src/components/FilterBar.tsx',
+      'src/hooks/useSignals.ts',
+      'src/api/signals.ts',
+      'src/tests/SignalList.test.tsx',
+      'package.json',
+      'tsconfig.json',
+      'vite.config.ts',
+    ];
+
+    const stellarRepoIntel: RepositoryIntelligenceData = {
+      owner: 'AgesEmpire',
+      repo: 'StellarSwipe-FrontEnd',
+      defaultBranch: 'main',
+      description: 'StellarSwipe decentralized signal discovery platform',
+      stars: 42,
+      forks: 11,
+      openIssuesCount: 15,
+      isPrivate: false,
+      discoveredInstructionFiles: ['package.json'],
+      discoveredInstructions: [],
+      workflowFiles: ['.github/workflows/ci.yml'],
+      relevantSourceDirs: ['src'],
+      relevantTestDirs: ['src/tests'],
+      totalTreeFilesCount: stellarSwipeTree.length,
+      sampleTreeFiles: stellarSwipeTree,
+      allTreeFiles: stellarSwipeTree,
+    };
+
+    const stellarDepConfig: DependencyConfigAnalysis = {
+      framework: 'React',
+      language: 'TypeScript',
+      packageManager: 'npm',
+      runtime: 'Node.js',
+      majorDependencies: ['react', 'lucide-react'],
+      testFramework: 'Vitest',
+      lintTooling: 'ESLint',
+      buildTooling: 'Vite',
+      ciSystem: 'GitHub Actions',
+      externalConfiguration: [],
+      scripts: {
+        test: 'vitest run',
+        lint: 'eslint .',
+        typecheck: 'tsc --noEmit',
+        build: 'vite build',
+      },
+    };
+
+    it('generates distinct, evidence-based proposed changes and diverse AC mappings for StellarSwipe-FrontEnd #657', () => {
+      const mockRawFiles: Record<string, string> = {
+        'src/components/SignalList.tsx': `
+          export const SignalList = ({ signals }) => {
+            return <div className="signal-list">{signals.map(s => <div key={s.id}>{s.name}</div>)}</div>;
+          };
+        `,
+        'src/components/FilterBar.tsx': `
+          export const FilterBar = ({ onFilter }) => {
+            return <div className="filter-bar"><button onClick={() => onFilter('crypto')}>Crypto</button></div>;
+          };
+        `,
+        'src/api/signals.ts': `
+          export async function getSignals(search, filter) {
+            return fetch('/api/signals?q=' + search);
+          }
+        `,
+      };
+
+      const analysis = issueAnalysisService.runGroundedSemanticAnalysis({
+        issueNumber: 657,
+        issueTitle: 'Improve search and filter discoverability in signal lists',
+        issueBody: 'Users have difficulty locating search and filter controls. Make the search bar and active filter chips prominent at the top of the signal list with instant clear action.',
+        issueLabels: [{ name: 'ui' }, { name: 'ux' }, { name: 'enhancement' }],
+        repositoryIntelligence: stellarRepoIntel,
+        dependencyConfig: stellarDepConfig,
+        repositoryAccessStatus: 'public_readable',
+        rawFiles: mockRawFiles,
+      });
+
+      expect(analysis.isBlocked).toBe(false);
+      const changes = analysis.implementationPlan.proposedChanges;
+      expect(changes.length).toBeGreaterThanOrEqual(4);
+
+      // 1. Zero boilerplate wording
+      for (const change of changes) {
+        expect(change.description).not.toContain('Apply updates to resolve issue requirements in');
+        expect(change.description).not.toContain('Apply modifications to address issue requirements');
+        expect(change.existingBehavior).toBeDefined();
+        expect(change.existingBehavior!.length).toBeGreaterThanOrEqual(15);
+        expect(change.specificChange).toBeDefined();
+        expect(change.specificChange!.length).toBeGreaterThanOrEqual(15);
+        expect(change.necessityExplanation).toBeDefined();
+        expect(change.necessityExplanation!.length).toBeGreaterThanOrEqual(15);
+        expect(change.verificationStrategy).toBeDefined();
+        expect(change.verificationStrategy!.length).toBeGreaterThanOrEqual(15);
+      }
+
+      // 2. Individual, diverse Acceptance Criteria mapping (not blanket AC-01)
+      const allMappedAcIds = changes.flatMap((c) => c.mappedAcceptanceCriteriaIds);
+      const uniqueMappedAcs = Array.from(new Set(allMappedAcIds));
+      expect(uniqueMappedAcs.length).toBeGreaterThan(1);
+
+      // 3. UI vs API discernment: API file is marked as INSPECTION_ONLY for a UI issue
+      const apiChange = changes.find((c) => c.targetFile.includes('api/signals'));
+      expect(apiChange).toBeDefined();
+      expect(apiChange?.changeRole).toBe('INSPECTION_ONLY');
+      expect(apiChange?.necessityExplanation).toContain('UI/UX focused');
+
+      // 4. Test file is identified as EXISTING_TEST
+      const testChange = changes.find((c) => c.targetFile.includes('SignalList.test.tsx'));
+      expect(testChange).toBeDefined();
+      expect(testChange?.changeRole).toBe('EXISTING_TEST');
+
+      // 5. Verification commands derived from package.json
+      expect(analysis.implementationPlan.testsToRun).toContain('npm test');
+      expect(analysis.implementationPlan.buildLintVerification).toContain('npm run lint');
+      expect(analysis.implementationPlan.buildLintVerification).toContain('npm run typecheck');
+      expect(analysis.implementationPlan.buildLintVerification).toContain('npm run build');
+    });
+
+    it('derives actual test, lint, typecheck, and build commands directly from package.json scripts', () => {
+      const { testsToRun, buildLintVerification } =
+        issueAnalysisService.runGroundedSemanticAnalysis({
+          issueNumber: 10,
+          issueTitle: 'Test scripts mapping',
+          issueBody: 'Test command derivation in repo with no test script.',
+          issueLabels: [],
+          repositoryIntelligence: stellarRepoIntel,
+          dependencyConfig: {
+            ...stellarDepConfig,
+            scripts: {}, // No scripts in package.json
+          },
+          repositoryAccessStatus: 'app_authorized',
+        }).implementationPlan;
+
+      // Must not blindly claim 'npm test' when no test script exists!
+      expect(testsToRun[0]).toContain('No test script declared in package.json');
+    });
+
+    it('Plan Quality Gate rejects generic ungrounded plans with boilerplate descriptions or blanket AC-01 mapping', () => {
+      const fakeAcs = [
+        { id: 'AC-01', description: 'Search bar is prominent', source: 'ISSUE' as const, type: 'FUNCTIONAL' as const, verificationStrategy: 'Test UI', confidence: 'HIGH' as const },
+        { id: 'AC-02', description: 'Active filters display badge count', source: 'ISSUE' as const, type: 'FUNCTIONAL' as const, verificationStrategy: 'Test UI', confidence: 'HIGH' as const },
+      ];
+
+      // 1. Boilerplate plan should be rejected
+      const boilerplatePlan = {
+        issueSummary: 'Test issue',
+        repositoryUnderstanding: 'Test repo',
+        proposedChanges: [
+          {
+            id: 'change-1',
+            targetFile: 'src/App.tsx',
+            description: 'Apply updates to resolve issue requirements in src/App.tsx.',
+            mappedAcceptanceCriteriaIds: ['AC-01'],
+          },
+        ],
+        testsToRun: ['npm test'],
+        buildLintVerification: ['npm run lint'],
+        risks: [],
+        blockers: [],
+        outOfScopeItems: [],
+        estimatedChangeSurface: 'SMALL' as const,
+      };
+
+      const boilerplateCheck = validateImplementationPlanQuality(boilerplatePlan, fakeAcs);
+      expect(boilerplateCheck.isValid).toBe(false);
+      expect(boilerplateCheck.reasons.some((r) => r.includes('generic boilerplate'))).toBe(true);
+
+      // 2. Blanket AC-01 mapping across multiple changes should be rejected
+      const blanketPlan = {
+        issueSummary: 'Test issue',
+        repositoryUnderstanding: 'Test repo',
+        proposedChanges: [
+          {
+            id: 'change-1',
+            targetFile: 'src/components/FilterBar.tsx',
+            description: 'Enhance filter chips with active counter and clear-all action.',
+            existingBehavior: 'Inspected component renders filter buttons without counter badge.',
+            specificChange: 'Add active filter counter badge and instant clear button.',
+            necessityExplanation: 'Improves discoverability of active filters in signal list view.',
+            mappedAcceptanceCriteriaIds: ['AC-01'],
+          },
+          {
+            id: 'change-2',
+            targetFile: 'src/components/SignalList.tsx',
+            description: 'Integrate prominent search and filter bar into list header.',
+            existingBehavior: 'Inspected component mounts list without integrated filter controls.',
+            specificChange: 'Place filter bar directly above signal items container.',
+            necessityExplanation: 'Ensures filters appear directly in primary viewport.',
+            mappedAcceptanceCriteriaIds: ['AC-01'],
+          },
+        ],
+        testsToRun: ['npm test'],
+        buildLintVerification: ['npm run lint'],
+        risks: [],
+        blockers: [],
+        outOfScopeItems: [],
+        estimatedChangeSurface: 'SMALL' as const,
+      };
+
+      const blanketCheck = validateImplementationPlanQuality(blanketPlan, fakeAcs);
+      expect(blanketCheck.isValid).toBe(false);
+      expect(blanketCheck.reasons.some((r) => r.includes('blanket-mapped'))).toBe(true);
+
+      // 3. Grounded analysis on StellarSwipe-FrontEnd #657 passes the quality gate
+      const groundedValidation = issueAnalysisService.runGroundedSemanticAnalysis({
+        issueNumber: 657,
+        issueTitle: 'Improve search and filter discoverability in signal lists',
+        issueBody: 'Users have difficulty locating search and filter controls. Make the search bar and active filter chips prominent at the top of the signal list with instant clear action.',
+        issueLabels: [{ name: 'ui' }, { name: 'ux' }, { name: 'enhancement' }],
+        repositoryIntelligence: stellarRepoIntel,
+        dependencyConfig: stellarDepConfig,
+        repositoryAccessStatus: 'app_authorized',
+      });
+
+      // The analysis service produces grounded changes, so quality gate passes for valid plans
+      expect(groundedValidation.isBlocked).toBe(false);
+      expect(groundedValidation.implementationPlan.proposedChanges.length).toBeGreaterThanOrEqual(4);
+      expect(groundedValidation.implementationPlan.proposedChanges[0].description).not.toContain('Apply updates to resolve issue requirements');
     });
   });
 });
