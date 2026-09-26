@@ -2,13 +2,22 @@
  * COSInput Foundation v0.3 — Contribution Session Store
  * Manages local contribution-analysis sessions without modifying GitHub.
  * Strictly read-only relative to GitHub.
+ * Enforces atomic analysis attempts, concurrency protection, and historical plan archiving.
  */
 
 import type {
   ContributionSession,
-  AnalysisStatus,
   RepositoryAccessStatus,
   ActivityTimelineItem,
+  ImplementationPlan,
+  AcceptanceCriterion,
+  RelevantFile,
+  BlockerItem,
+  IssueIntelligenceData,
+  RepositoryIntelligenceData,
+  DependencyConfigAnalysis,
+  VerifiedRepositorySnapshot,
+  HistoricalPlanRecord,
 } from './types';
 
 class ContributionSessionStore {
@@ -18,6 +27,10 @@ class ContributionSessionStore {
     const cleanOwner = owner.toLowerCase().replace(/[^a-z0-9_-]/g, '');
     const cleanRepo = repo.toLowerCase().replace(/[^a-z0-9_-]/g, '');
     return `contrib-${cleanOwner}-${cleanRepo}-${issueNumber}`;
+  }
+
+  generateAttemptId(): string {
+    return `attempt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   }
 
   createSession(params: {
@@ -67,6 +80,10 @@ class ContributionSessionStore {
       analysisStatus: 'NOT_STARTED',
       createdTimestamp: now,
       updatedTimestamp: now,
+      currentAttemptId: undefined,
+      currentAttemptStatus: 'NOT_STARTED',
+      lastVerifiedSnapshot: null,
+      historicalPlans: [],
       repositoryIntelligence: null,
       issueIntelligence: null,
       acceptanceCriteria: [],
@@ -103,6 +120,142 @@ class ContributionSessionStore {
     Object.assign(session, updates, {
       updatedTimestamp: new Date().toISOString(),
     });
+
+    return session;
+  }
+
+  /**
+   * Starts a new isolated analysis attempt with a unique attempt ID.
+   * Concurrency invariant: Any older running attempt will be rejected when completing.
+   */
+  startAnalysisAttempt(id: string): string {
+    const session = this.sessions.get(id);
+    if (!session) {
+      throw new Error(`Contribution session '${id}' not found.`);
+    }
+
+    const attemptId = this.generateAttemptId();
+    session.currentAttemptId = attemptId;
+    session.currentAttemptStatus = 'RUNNING';
+    session.analysisStatus = 'REPOSITORY_INSPECTION';
+    session.errorMessage = undefined;
+    session.updatedTimestamp = new Date().toISOString();
+
+    // Reset non-governance timeline events for this attempt
+    this.resetAnalysisAttempt(id);
+
+    return attemptId;
+  }
+
+  /**
+   * Commits analysis results atomically ONLY when all stages succeed.
+   * If a previous plan existed, archives it to historicalPlans.
+   * Rejects stale/superseded attempts.
+   */
+  commitAnalysisAttempt(
+    id: string,
+    attemptId: string,
+    data: {
+      repositoryIntelligence: RepositoryIntelligenceData;
+      dependencyConfig: DependencyConfigAnalysis;
+      issueIntelligence: IssueIntelligenceData;
+      acceptanceCriteria: AcceptanceCriterion[];
+      relevantFiles: RelevantFile[];
+      blockers: BlockerItem[];
+      implementationPlan: ImplementationPlan;
+      isBlocked: boolean;
+    }
+  ): ContributionSession {
+    const session = this.sessions.get(id);
+    if (!session) {
+      throw new Error(`Contribution session '${id}' not found.`);
+    }
+
+    // Stale/concurrent check: ensure this is still the active attempt
+    if (session.currentAttemptId && session.currentAttemptId !== attemptId) {
+      throw new Error(
+        `Attempt '${attemptId}' is stale. Superseded by newer attempt '${session.currentAttemptId}'.`
+      );
+    }
+
+    const now = new Date().toISOString();
+
+    // If an existing plan existed, archive it to historicalPlans before publishing new one
+    if (session.implementationPlan) {
+      if (!session.historicalPlans) session.historicalPlans = [];
+      session.historicalPlans.push({
+        attemptId: session.currentAttemptId || 'prev',
+        completedAt: session.updatedTimestamp,
+        plan: session.implementationPlan,
+        acceptanceCriteria: session.acceptanceCriteria || [],
+        status: 'superseded',
+      });
+    }
+
+    // Update verified repository snapshot
+    session.lastVerifiedSnapshot = {
+      timestamp: now,
+      repositoryIntelligence: data.repositoryIntelligence,
+      dependencyConfig: data.dependencyConfig,
+      status: 'verified',
+    };
+
+    const finalStatus = data.isBlocked ? 'BLOCKED' : 'PLAN_READY';
+
+    session.repositoryIntelligence = data.repositoryIntelligence;
+    session.dependenciesAndConfig = data.dependencyConfig;
+    session.issueIntelligence = data.issueIntelligence;
+    session.acceptanceCriteria = data.acceptanceCriteria;
+    session.relevantFiles = data.relevantFiles;
+    session.blockers = data.blockers;
+    session.implementationPlan = data.implementationPlan;
+    session.analysisStatus = finalStatus;
+    session.currentAttemptStatus = 'SUCCEEDED';
+    session.errorMessage = undefined;
+    session.updatedTimestamp = now;
+
+    return session;
+  }
+
+  /**
+   * Fails the current attempt atomically.
+   * Disables plan approval and preserves previous successful plan as historical data.
+   */
+  failAnalysisAttempt(id: string, attemptId: string, errorMsg: string): ContributionSession {
+    const session = this.sessions.get(id);
+    if (!session) {
+      throw new Error(`Contribution session '${id}' not found.`);
+    }
+
+    // Ignore failure notifications from stale attempts
+    if (session.currentAttemptId && session.currentAttemptId !== attemptId) {
+      return session;
+    }
+
+    const now = new Date().toISOString();
+
+    // Preserve previous plan as historical data if not already archived
+    if (session.implementationPlan) {
+      if (!session.historicalPlans) session.historicalPlans = [];
+      const alreadyArchived = session.historicalPlans.some((h) => h.plan === session.implementationPlan);
+      if (!alreadyArchived) {
+        session.historicalPlans.push({
+          attemptId: 'historical-verified',
+          completedAt: session.updatedTimestamp,
+          plan: session.implementationPlan,
+          acceptanceCriteria: session.acceptanceCriteria || [],
+          status: 'historical',
+        });
+      }
+    }
+
+    // Do NOT present partial or previous plan as current/approval-ready
+    session.implementationPlan = null;
+    session.currentAttemptStatus = 'FAILED';
+    session.analysisStatus = 'FAILED';
+    session.errorMessage = errorMsg;
+    session.humanApproval = { status: 'pending' };
+    session.updatedTimestamp = now;
 
     return session;
   }

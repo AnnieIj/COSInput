@@ -5,6 +5,7 @@
  */
 
 import { getGitHubAppConfig } from './config';
+import { safeParseResponse } from './responseUtils';
 import type { GitHubUserProfile, SanitizedGitHubError } from './types';
 
 interface UserSession {
@@ -85,6 +86,7 @@ export class UserAuthStore {
       },
     });
 
+    const parsed = await safeParseResponse<any>(res);
     if (!res.ok) {
       if (res.status === 404) {
         const error: SanitizedGitHubError = {
@@ -94,7 +96,7 @@ export class UserAuthStore {
         };
         throw error;
       }
-      const errorText = await res.text();
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
       const error: SanitizedGitHubError = {
         classification: res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 403 ? 'AUTHORIZATION_FAILURE' : 'GITHUB_SERVICE_FAILURE',
         statusCode: res.status,
@@ -103,7 +105,7 @@ export class UserAuthStore {
       throw error;
     }
 
-    const userData = (await res.json()) as any;
+    const userData = parsed.json || {};
     const profile: GitHubUserProfile = {
       id: String(userData.id),
       login: userData.login,
@@ -145,6 +147,7 @@ export class UserAuthStore {
       }),
     });
 
+    const tokenParsed = await safeParseResponse<any>(tokenRes);
     if (!tokenRes.ok) {
       const error: SanitizedGitHubError = {
         classification: 'AUTHENTICATION_FAILURE',
@@ -154,7 +157,7 @@ export class UserAuthStore {
       throw error;
     }
 
-    const tokenData = (await tokenRes.json()) as any;
+    const tokenData = tokenParsed.json || {};
     if (tokenData.error || !tokenData.access_token) {
       const error: SanitizedGitHubError = {
         classification: 'AUTHENTICATION_FAILURE',
@@ -176,6 +179,7 @@ export class UserAuthStore {
       },
     });
 
+    const userParsed = await safeParseResponse<any>(userRes);
     if (!userRes.ok) {
       const error: SanitizedGitHubError = {
         classification: 'AUTHENTICATION_FAILURE',
@@ -185,7 +189,7 @@ export class UserAuthStore {
       throw error;
     }
 
-    const userData = (await userRes.json()) as any;
+    const userData = userParsed.json || {};
     const profile: GitHubUserProfile = {
       id: String(userData.id),
       login: userData.login,

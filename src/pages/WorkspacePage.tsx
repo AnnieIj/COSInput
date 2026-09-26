@@ -108,6 +108,27 @@ export const WorkspacePage: React.FC = () => {
         setSession(res.session);
       }
     } catch (err: any) {
+      if (err.session) {
+        setSession(err.session);
+      } else {
+        const refreshed = await githubService.getContributionSession(sessionId).catch(() => null);
+        if (refreshed?.session) {
+          setSession(refreshed.session);
+        } else {
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  analysisStatus: 'FAILED',
+                  currentAttemptStatus: 'FAILED',
+                  errorMessage: err.message,
+                  implementationPlan: null,
+                }
+              : prev
+          );
+        }
+      }
+
       setError(
         err.classification
           ? err
@@ -412,7 +433,34 @@ export const WorkspacePage: React.FC = () => {
         </div>
       )}
 
-      {session && session.analysisStatus === 'PLAN_READY' && (
+      {session && (session.analysisStatus === 'FAILED' || session.currentAttemptStatus === 'FAILED') && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-error-container/20 border border-error/40 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-error text-on-error flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">block</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="font-headline-sm text-headline-sm font-bold text-error">
+                  Analysis Failed — Approval Blocked
+                </span>
+                <span className="font-body-sm text-body-sm text-on-surface">
+                  The current analysis attempt encountered a failure. No partial plan has been published, and plan approval is strictly disabled.
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => runAnalysis(session.id)}
+              className="px-4 py-2 rounded-lg bg-error text-on-error font-label-md text-label-md font-semibold cursor-pointer shrink-0"
+            >
+              Retry Analysis
+            </button>
+          </div>
+        </div>
+      )}
+
+      {session && session.analysisStatus === 'PLAN_READY' && session.currentAttemptStatus === 'SUCCEEDED' && session.implementationPlan && (
         <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
           <div className="p-4 rounded-xl bg-primary-fixed/30 border border-primary/25 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -736,19 +784,85 @@ export const WorkspacePage: React.FC = () => {
                       </div>
                     </div>
                   ) : (
-                    <div className="p-8 rounded-xl bg-surface-container-lowest border border-surface-container text-center space-y-3">
-                      <span className="material-symbols-outlined text-[40px] text-outline">pending_actions</span>
-                      <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">Plan Not Generated Yet</h3>
-                      <p className="font-body-md text-body-md text-secondary max-w-md mx-auto">
-                        Repository inspection and issue analysis have not run for this contribution session.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => runAnalysis(session.id)}
-                        className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold"
-                      >
-                        Run Repository & Issue Analysis
-                      </button>
+                    <div className="space-y-6">
+                      {session.currentAttemptStatus === 'FAILED' ? (
+                        <div className="p-6 rounded-xl bg-surface-container-lowest border border-error/30 space-y-4">
+                          <div className="flex items-center gap-2 text-error font-bold font-headline-sm text-headline-sm">
+                            <span className="material-symbols-outlined text-[24px]">gpp_bad</span>
+                            <span>Analysis Attempt Failed — Approval Strictly Disabled</span>
+                          </div>
+                          <p className="font-body-md text-body-md text-on-surface">
+                            The current analysis attempt failed and was aborted. No unverified or partial plan is ready for review or approval.
+                          </p>
+                          {session.errorMessage && (
+                            <div className="p-3.5 rounded-lg bg-error-container/10 border border-error/20 font-code-sm text-[12px] text-error font-mono break-all">
+                              {session.errorMessage}
+                            </div>
+                          )}
+                          <div className="pt-2">
+                            <button
+                              type="button"
+                              onClick={() => runAnalysis(session.id)}
+                              className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold cursor-pointer"
+                            >
+                              Retry Repository & Issue Analysis
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-8 rounded-xl bg-surface-container-lowest border border-surface-container text-center space-y-3">
+                          <span className="material-symbols-outlined text-[40px] text-outline">pending_actions</span>
+                          <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">Plan Not Generated Yet</h3>
+                          <p className="font-body-md text-body-md text-secondary max-w-md mx-auto">
+                            Repository inspection and issue analysis have not run for this contribution session.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => runAnalysis(session.id)}
+                            className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold"
+                          >
+                            Run Repository & Issue Analysis
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Preserved Historical Plans */}
+                      {session.historicalPlans && session.historicalPlans.length > 0 && (
+                        <div className="p-6 rounded-xl bg-surface-container-low border border-surface-container space-y-4">
+                          <div className="flex items-center justify-between border-b border-surface-container pb-3">
+                            <div className="flex items-center gap-2">
+                              <span className="material-symbols-outlined text-secondary text-[22px]">history</span>
+                              <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                                Historical Plan (Preserved from Previous Attempt)
+                              </h3>
+                            </div>
+                            <span className="px-2.5 py-0.5 rounded font-code-sm text-[11px] font-bold uppercase bg-surface-container-high text-secondary border border-surface-container">
+                              ARCHIVED SNAPSHOT — NOT APPROVABLE
+                            </span>
+                          </div>
+                          <p className="font-body-sm text-body-sm text-secondary">
+                            This implementation plan was generated during an earlier successful attempt (Archived at: {new Date(session.historicalPlans[session.historicalPlans.length - 1].completedAt).toLocaleString()}). It is preserved strictly as historical data and cannot be approved against the failed current attempt.
+                          </p>
+                          <div className="space-y-3">
+                            <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                              Preserved Proposed Changes ({session.historicalPlans[session.historicalPlans.length - 1].plan.proposedChanges.length})
+                            </span>
+                            <div className="space-y-2">
+                              {session.historicalPlans[session.historicalPlans.length - 1].plan.proposedChanges.map((change, idx) => (
+                                <div key={idx} className="p-3 rounded-lg bg-surface-container-lowest border border-surface-container flex items-center justify-between text-sm">
+                                  <div>
+                                    <span className="font-code-sm text-[12px] text-on-surface font-semibold block">{change.targetFile}</span>
+                                    <span className="font-body-sm text-[12px] text-secondary">{change.description}</span>
+                                  </div>
+                                  <span className="font-label-sm text-[10px] px-2 py-0.5 rounded bg-surface-container text-secondary uppercase font-semibold">
+                                    {change.changeRole || 'HISTORICAL'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

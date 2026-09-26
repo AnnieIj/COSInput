@@ -3,6 +3,7 @@
  * Performs read-only progressive inspection of public or GitHub App authorized repositories.
  * Extracts metadata, git tree structure, contributor instructions (AGENTS.md, CONTRIBUTING.md),
  * manifests, configs, and dependency landscapes without modifying GitHub.
+ * Preserves verified snapshot state and prevents regression to default values on partial failures.
  */
 
 import { githubServerClient } from './githubClient';
@@ -12,17 +13,19 @@ import type {
   RepositoryInstructionItem,
   DependencyConfigAnalysis,
   ExternalConfigurationItem,
-  SanitizedGitHubError,
+  VerifiedRepositorySnapshot,
 } from './types';
 
 export class RepositoryIntelligenceService {
   /**
    * Inspects a repository safely and progressively.
+   * If previousVerifiedSnapshot is provided, verified metadata is never overwritten with unverified defaults.
    */
   async inspectRepository(
     owner: string,
     repo: string,
-    installationId?: number | null
+    installationId?: number | null,
+    previousSnapshot?: VerifiedRepositorySnapshot | null
   ): Promise<{
     repositoryIntelligence: RepositoryIntelligenceData;
     dependencyConfig: DependencyConfigAnalysis;
@@ -31,17 +34,41 @@ export class RepositoryIntelligenceService {
     const bearerToken = userAuthStore.getUserToken() || undefined;
 
     // 1. Fetch Repository Metadata
-    const repoDetails = await githubServerClient.getRepositoryDetails(
-      installationId,
-      owner,
-      repo,
-      bearerToken
-    );
+    let repoDetails: any = null;
+    try {
+      repoDetails = await githubServerClient.getRepositoryDetails(
+        installationId,
+        owner,
+        repo,
+        bearerToken
+      );
+    } catch {
+      // If fetching details fails, use fallback or previous verified snapshot
+      if (previousSnapshot) {
+        repoDetails = {
+          defaultBranch: previousSnapshot.repositoryIntelligence.defaultBranch,
+          description: previousSnapshot.repositoryIntelligence.description,
+          stars: previousSnapshot.repositoryIntelligence.stars,
+          forks: previousSnapshot.repositoryIntelligence.forks,
+          openIssuesCount: previousSnapshot.repositoryIntelligence.openIssuesCount,
+          isPrivate: previousSnapshot.repositoryIntelligence.isPrivate,
+        };
+      } else {
+        repoDetails = {
+          defaultBranch: 'main',
+          description: '',
+          stars: 0,
+          forks: 0,
+          openIssuesCount: 0,
+          isPrivate: false,
+        };
+      }
+    }
 
     const defaultBranch = repoDetails.defaultBranch || 'main';
 
     // 2. Fetch Git Tree (recursive, safe)
-    let treeFiles: { path: string; type: string; size?: number }[] = [];
+    let treeFiles: { path: string; type: string; size?: number; sha?: string }[] = [];
     try {
       const treeData = await githubServerClient.getRepositoryTree(
         installationId,
@@ -66,9 +93,18 @@ export class RepositoryIntelligenceService {
           path: item.path,
           type: item.type === 'dir' ? 'tree' : 'blob',
           size: item.size,
+          sha: item.sha,
         }));
       } catch {
-        treeFiles = [];
+        // If tree retrieval also fails, use previous snapshot tree if available
+        if (previousSnapshot?.repositoryIntelligence?.allTreeFiles) {
+          treeFiles = previousSnapshot.repositoryIntelligence.allTreeFiles.map((p) => ({
+            path: p,
+            type: 'blob',
+          }));
+        } else {
+          treeFiles = [];
+        }
       }
     }
 
@@ -76,7 +112,21 @@ export class RepositoryIntelligenceService {
     const blobPaths = treeFiles.filter((f) => f.type === 'blob').map((f) => f.path);
 
     // 3. Identify Candidate Instruction & Config Files in Tree
+    // Manifests and critical tooling configs ALWAYS take precedence over generic readmes!
     const candidatePaths = [
+      'package.json',
+      'tsconfig.json',
+      'vitest.config.ts',
+      'vitest.config.js',
+      'jest.config.js',
+      'jest.config.ts',
+      'next.config.js',
+      'next.config.ts',
+      'next.config.mjs',
+      'Cargo.toml',
+      'pyproject.toml',
+      'requirements.txt',
+      'go.mod',
       'AGENTS.md',
       '.github/AGENTS.md',
       'CONTRIBUTING.md',
@@ -84,27 +134,11 @@ export class RepositoryIntelligenceService {
       'docs/CONTRIBUTING.md',
       'README.md',
       'README.txt',
-      'CODE_OF_CONDUCT.md',
-      '.github/pull_request_template.md',
-      '.github/PULL_REQUEST_TEMPLATE.md',
-      'package.json',
+      '.env.example',
+      '.env.sample',
       'package-lock.json',
       'pnpm-lock.yaml',
       'yarn.lock',
-      'Cargo.toml',
-      'pyproject.toml',
-      'requirements.txt',
-      'go.mod',
-      'pom.xml',
-      'tsconfig.json',
-      'vite.config.ts',
-      'vite.config.js',
-      'webpack.config.js',
-      'vitest.config.ts',
-      'jest.config.js',
-      'Makefile',
-      '.env.example',
-      '.env.sample',
     ];
 
     // Select existing candidate files from tree
@@ -117,8 +151,8 @@ export class RepositoryIntelligenceService {
       (p) => p.startsWith('.github/workflows/') && (p.endsWith('.yml') || p.endsWith('.yaml'))
     );
 
-    // Read top candidate files (limit to at most 10 critical files to respect rate limits)
-    const filesToRead = matchingPaths.slice(0, 10);
+    // Read top candidate files (limit to at most 15 critical files to respect rate limits)
+    const filesToRead = matchingPaths.slice(0, 15);
     const rawFiles: Record<string, string> = {};
 
     for (const filePath of filesToRead) {
@@ -145,25 +179,85 @@ export class RepositoryIntelligenceService {
     const relevantTestDirs = this.detectTestDirs(allFilePaths);
 
     // 6. Analyze Dependency & Configuration Landscape
-    const dependencyConfig = this.analyzeDependenciesAndConfig(rawFiles, blobPaths, workflowFiles);
+    let dependencyConfig = this.analyzeDependenciesAndConfig(rawFiles, blobPaths, workflowFiles);
+
+    // 7. PRESERVE VERIFIED SNAPSHOT: Never overwrite verified repository metadata with empty/default values!
+    if (previousSnapshot?.dependencyConfig) {
+      const prev = previousSnapshot.dependencyConfig;
+      dependencyConfig = {
+        framework:
+          dependencyConfig.framework !== 'None / framework-agnostic'
+            ? dependencyConfig.framework
+            : prev.framework || 'None / framework-agnostic',
+        language:
+          dependencyConfig.language !== 'Unknown'
+            ? dependencyConfig.language
+            : prev.language || 'Unknown',
+        packageManager:
+          dependencyConfig.packageManager !== 'Unknown'
+            ? dependencyConfig.packageManager
+            : prev.packageManager || 'Unknown',
+        runtime:
+          dependencyConfig.runtime !== 'Node.js' || dependencyConfig.framework !== 'None / framework-agnostic'
+            ? dependencyConfig.runtime
+            : prev.runtime || 'Node.js',
+        majorDependencies:
+          dependencyConfig.majorDependencies.length > 0
+            ? dependencyConfig.majorDependencies
+            : prev.majorDependencies || [],
+        testFramework:
+          dependencyConfig.testFramework !== 'None detected'
+            ? dependencyConfig.testFramework
+            : prev.testFramework || 'None detected',
+        lintTooling:
+          dependencyConfig.lintTooling !== 'None detected'
+            ? dependencyConfig.lintTooling
+            : prev.lintTooling || 'None detected',
+        buildTooling:
+          dependencyConfig.buildTooling !== 'None detected'
+            ? dependencyConfig.buildTooling
+            : prev.buildTooling || 'None detected',
+        ciSystem:
+          dependencyConfig.ciSystem !== 'None detected'
+            ? dependencyConfig.ciSystem
+            : prev.ciSystem || 'None detected',
+        externalConfiguration:
+          dependencyConfig.externalConfiguration.length > 0
+            ? dependencyConfig.externalConfiguration
+            : prev.externalConfiguration || [],
+        scripts:
+          dependencyConfig.scripts && Object.keys(dependencyConfig.scripts).length > 0
+            ? dependencyConfig.scripts
+            : prev.scripts || {},
+      };
+    }
 
     const repositoryIntelligence: RepositoryIntelligenceData = {
       owner,
       repo,
       defaultBranch,
-      description: repoDetails.description || '',
-      stars: repoDetails.stars || 0,
-      forks: repoDetails.forks || 0,
-      openIssuesCount: repoDetails.openIssuesCount || 0,
-      isPrivate: repoDetails.isPrivate,
+      description: repoDetails.description || previousSnapshot?.repositoryIntelligence?.description || '',
+      stars: repoDetails.stars || previousSnapshot?.repositoryIntelligence?.stars || 0,
+      forks: repoDetails.forks || previousSnapshot?.repositoryIntelligence?.forks || 0,
+      openIssuesCount: repoDetails.openIssuesCount || previousSnapshot?.repositoryIntelligence?.openIssuesCount || 0,
+      isPrivate: Boolean(repoDetails.isPrivate),
       discoveredInstructionFiles: Object.keys(rawFiles),
-      discoveredInstructions,
+      discoveredInstructions:
+        discoveredInstructions.length > 0
+          ? discoveredInstructions
+          : previousSnapshot?.repositoryIntelligence?.discoveredInstructions || [],
       workflowFiles,
-      relevantSourceDirs,
-      relevantTestDirs,
-      totalTreeFilesCount: blobPaths.length,
+      relevantSourceDirs:
+        relevantSourceDirs.length > 0
+          ? relevantSourceDirs
+          : previousSnapshot?.repositoryIntelligence?.relevantSourceDirs || [],
+      relevantTestDirs:
+        relevantTestDirs.length > 0
+          ? relevantTestDirs
+          : previousSnapshot?.repositoryIntelligence?.relevantTestDirs || [],
+      totalTreeFilesCount: blobPaths.length || previousSnapshot?.repositoryIntelligence?.totalTreeFilesCount || 0,
       sampleTreeFiles: blobPaths.slice(0, 100),
-      allTreeFiles: blobPaths,
+      allTreeFiles: blobPaths.length > 0 ? blobPaths : previousSnapshot?.repositoryIntelligence?.allTreeFiles || [],
     };
 
     return {
@@ -240,6 +334,8 @@ export class RepositoryIntelligenceService {
 
   /**
    * Analyzes dependencies, frameworks, test tools, and required external configurations.
+   * Leverages both raw file content and tree signatures (e.g. lockfiles, configs) so
+   * detection never silently collapses to unknown when an individual file read fails.
    */
   analyzeDependenciesAndConfig(
     rawFiles: Record<string, string>,
@@ -258,7 +354,48 @@ export class RepositoryIntelligenceService {
     const externalConfiguration: ExternalConfigurationItem[] = [];
     let scripts: Record<string, string> = {};
 
-    // Parse package.json if present
+    // 1. Structural Tree Signatures (Ground truth from repository file paths)
+    if (allBlobPaths.some((p) => p.endsWith('.ts') || p.endsWith('.tsx') || p.includes('tsconfig.json'))) {
+      language = 'TypeScript';
+    } else if (allBlobPaths.some((p) => p.endsWith('.js') || p.endsWith('.jsx'))) {
+      language = 'JavaScript';
+    } else if (allBlobPaths.some((p) => p.endsWith('.rs') || p.endsWith('Cargo.toml'))) {
+      language = 'Rust';
+    } else if (allBlobPaths.some((p) => p.endsWith('.py') || p.endsWith('pyproject.toml') || p.endsWith('requirements.txt'))) {
+      language = 'Python';
+    }
+
+    if (allBlobPaths.some((p) => p.includes('pnpm-lock.yaml'))) {
+      packageManager = 'pnpm';
+    } else if (allBlobPaths.some((p) => p.includes('yarn.lock'))) {
+      packageManager = 'yarn';
+    } else if (allBlobPaths.some((p) => p.includes('package-lock.json') || p.endsWith('package.json'))) {
+      packageManager = 'npm';
+    } else if (allBlobPaths.some((p) => p.includes('Cargo.lock') || p.endsWith('Cargo.toml'))) {
+      packageManager = 'Cargo';
+    }
+
+    if (allBlobPaths.some((p) => p.includes('next.config.') || p.startsWith('app/') || p.startsWith('pages/'))) {
+      framework = 'Next.js';
+    }
+
+    if (allBlobPaths.some((p) => p.includes('vitest.config.') || p.includes('.vitest.'))) {
+      testFramework = 'Vitest';
+    } else if (allBlobPaths.some((p) => p.includes('jest.config.'))) {
+      testFramework = 'Jest';
+    }
+
+    if (allBlobPaths.some((p) => p.includes('.eslintrc') || p.includes('eslint.config.'))) {
+      lintTooling = 'ESLint';
+    } else if (allBlobPaths.some((p) => p.includes('biome.json') || p.includes('@biomejs/biome'))) {
+      lintTooling = 'Biome';
+    }
+
+    if (allBlobPaths.some((p) => p.includes('vite.config.'))) {
+      buildTooling = 'Vite';
+    }
+
+    // 2. Deep Inspection from package.json if present
     const pkgContent = rawFiles['package.json'];
     if (pkgContent) {
       try {
@@ -266,11 +403,6 @@ export class RepositoryIntelligenceService {
         if (pkg.scripts && typeof pkg.scripts === 'object') {
           scripts = { ...pkg.scripts };
         }
-        packageManager = allBlobPaths.includes('pnpm-lock.yaml')
-          ? 'pnpm'
-          : allBlobPaths.includes('yarn.lock')
-          ? 'yarn'
-          : 'npm';
 
         const deps = { ...pkg.dependencies, ...pkg.devDependencies };
         const depKeys = Object.keys(deps);
@@ -303,39 +435,51 @@ export class RepositoryIntelligenceService {
         } else if (depKeys.includes('astro')) {
           framework = 'Astro';
         } else if (depKeys.includes('react')) {
-          framework = 'React';
+          if (framework === 'None / framework-agnostic') framework = 'React';
         } else if (depKeys.includes('vue')) {
-          framework = 'Vue.js';
+          if (framework === 'None / framework-agnostic') framework = 'Vue.js';
         } else if (depKeys.includes('@angular/core')) {
           framework = 'Angular';
         } else if (depKeys.includes('svelte')) {
           framework = 'Svelte';
-        } else {
-          framework = 'None / framework-agnostic';
         }
 
-        if (depKeys.includes('typescript') || allBlobPaths.some((p) => p.endsWith('.ts') || p.endsWith('.tsx'))) {
+        if (depKeys.includes('typescript')) {
           language = 'TypeScript';
-        } else if (allBlobPaths.some((p) => p.endsWith('.js') || p.endsWith('.jsx'))) {
-          language = 'JavaScript';
         }
 
-        if (depKeys.includes('vitest')) testFramework = 'Vitest';
-        else if (depKeys.includes('jest')) testFramework = 'Jest';
-        else if (depKeys.includes('mocha')) testFramework = 'Mocha';
-        else if (depKeys.includes('@playwright/test')) testFramework = 'Playwright';
+        // Test tooling
+        if (depKeys.includes('vitest') || (scripts['test:vitest'] && !depKeys.includes('jest'))) {
+          testFramework = 'Vitest';
+        } else if (depKeys.includes('vitest')) {
+          testFramework = 'Vitest';
+        } else if (depKeys.includes('jest') && !depKeys.includes('vitest')) {
+          testFramework = 'Jest';
+        } else if (depKeys.includes('vitest') && depKeys.includes('jest')) {
+          // If both exist, check which is primary or default in package.json
+          testFramework = 'Vitest';
+        } else if (depKeys.includes('mocha')) {
+          testFramework = 'Mocha';
+        } else if (depKeys.includes('@playwright/test')) {
+          testFramework = 'Playwright';
+        }
 
-        if (depKeys.includes('eslint')) lintTooling = 'ESLint';
-        if (depKeys.includes('biome') || depKeys.includes('@biomejs/biome')) lintTooling = 'Biome';
+        if (depKeys.includes('eslint') || scripts['lint']?.includes('next lint') || scripts['lint']?.includes('eslint')) {
+          lintTooling = 'ESLint';
+        }
+        if (depKeys.includes('biome') || depKeys.includes('@biomejs/biome')) {
+          lintTooling = 'Biome';
+        }
 
         if (depKeys.includes('vite')) buildTooling = 'Vite';
+        else if (depKeys.includes('next')) buildTooling = 'Next.js (SWC/Turbopack)';
         else if (depKeys.includes('webpack')) buildTooling = 'Webpack';
         else if (depKeys.includes('esbuild')) buildTooling = 'esbuild';
         else if (depKeys.includes('tsup')) buildTooling = 'tsup';
 
-        majorDependencies.push(...depKeys.slice(0, 20));
+        majorDependencies.push(...depKeys.slice(0, 25));
       } catch {
-        // Ignore
+        // Ignore json parse failure
       }
     } else if (allBlobPaths.some((p) => p.endsWith('Cargo.toml'))) {
       language = 'Rust';
@@ -346,13 +490,11 @@ export class RepositoryIntelligenceService {
       if (allBlobPaths.some((p) => p.includes('actix'))) framework = 'Actix-web';
       else if (allBlobPaths.some((p) => p.includes('axum'))) framework = 'Axum';
       else if (allBlobPaths.some((p) => p.includes('rocket'))) framework = 'Rocket';
-      else framework = 'None / framework-agnostic';
     } else if (allBlobPaths.some((p) => p.endsWith('pyproject.toml') || p.endsWith('requirements.txt'))) {
       language = 'Python';
       packageManager = 'pip / poetry';
       runtime = 'Python 3';
       testFramework = 'pytest';
-      framework = 'None / framework-agnostic';
     }
 
     // Inspect .env.example for required external configuration
@@ -428,7 +570,7 @@ export class RepositoryIntelligenceService {
       .filter((l) => l.length > 0 && !l.startsWith('#'))
       .join(' ');
     if (cleaned.length <= maxLen) return cleaned;
-    return cleaned.substring(0, maxLen).trim() + '...';
+    return cleaned.substring(0, maxLen) + '...';
   }
 }
 

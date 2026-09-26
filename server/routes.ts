@@ -626,8 +626,9 @@ githubRouter.get('/contributions/:id', (req, res) => {
 
 /**
  * POST /api/github/contributions/:id/analyze
- * Executes Repository Intelligence & Issue Analysis pipeline.
+ * Executes Repository Intelligence & Issue Analysis pipeline atomically.
  * Strictly read-only relative to GitHub.
+ * Enforces attempt isolation, concurrency protection, and historical plan archiving.
  */
 githubRouter.post('/contributions/:id/analyze', async (req, res) => {
   const session = contributionSessionStore.getSession(req.params.id);
@@ -641,21 +642,17 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
     });
   }
 
-  try {
-    // Reset timeline for fresh analysis attempt (prevents duplicate event emission)
-    contributionSessionStore.resetAnalysisAttempt(session.id);
+  // Start isolated attempt
+  const attemptId = contributionSessionStore.startAnalysisAttempt(session.id);
 
-    // 1. Mark status: REPOSITORY_INSPECTION
-    contributionSessionStore.updateSession(session.id, {
-      analysisStatus: 'REPOSITORY_INSPECTION',
-    });
+  try {
     contributionSessionStore.addTimelineEvent(
       session.id,
       'Issue Loaded',
-      `Targeted #${session.issueNumber} in ${session.upstreamRepository} for read-only inspection.`
+      `Targeted #${session.issueNumber} in ${session.upstreamRepository} for read-only inspection (Attempt: ${attemptId}).`
     );
 
-    // 2. Fetch live issue payload from GitHub
+    // 1. Fetch live issue payload from GitHub
     const issuePayload = await githubServerClient
       .getIssue(
         null,
@@ -664,8 +661,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
         session.issueNumber,
         userAuthStore.getUserToken() || undefined
       )
-      .catch((err) => {
-        // If error fetching issue details, return existing session title as body fallback
+      .catch(() => {
         return {
           title: session.issueTitle,
           body: '',
@@ -673,7 +669,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
         };
       });
 
-    // 3. Inspect repository
+    // 2. Inspect repository with snapshot preservation
     contributionSessionStore.addTimelineEvent(
       session.id,
       'Repository Inspected',
@@ -683,7 +679,9 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
     const { repositoryIntelligence, dependencyConfig, rawFiles } =
       await repositoryIntelligenceService.inspectRepository(
         session.repositoryOwner,
-        session.repositoryName
+        session.repositoryName,
+        null,
+        session.lastVerifiedSnapshot
       );
 
     if (repositoryIntelligence.discoveredInstructions.length > 0) {
@@ -694,14 +692,13 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       );
     }
 
-    // 4. Mark status: ISSUE_ANALYSIS
+    // 3. Mark status: ISSUE_ANALYSIS for this attempt
     contributionSessionStore.updateSession(session.id, {
       analysisStatus: 'ISSUE_ANALYSIS',
-      repositoryIntelligence,
-      dependenciesAndConfig: dependencyConfig,
     });
 
-    const fetchFileContent = async (filePath: string): Promise<string> => {
+    const fileMetadata: Record<string, { sha?: string }> = {};
+    const fetchFileContent = async (filePath: string): Promise<{ content: string; sha?: string }> => {
       try {
         const fileRes = await githubServerClient.getFileContent(
           null,
@@ -711,13 +708,16 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
           repositoryIntelligence.defaultBranch,
           userAuthStore.getUserToken() || undefined
         );
-        return fileRes.content || '';
+        if (fileRes.sha) {
+          fileMetadata[filePath] = { sha: fileRes.sha };
+        }
+        return { content: fileRes.content || '', sha: fileRes.sha };
       } catch {
-        return '';
+        return { content: '', sha: undefined };
       }
     };
 
-    // 5. Run Issue Analysis & Acceptance Criteria Engine & Blocker Detection
+    // 4. Run Issue Analysis & Acceptance Criteria Engine & Blocker Detection
     const analysisResult = await issueAnalysisService.analyzeIssue({
       issueNumber: session.issueNumber,
       issueTitle: issuePayload.title || session.issueTitle,
@@ -727,6 +727,8 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       dependencyConfig,
       repositoryAccessStatus: session.repositoryAccessStatus,
       rawFiles,
+      fileMetadata,
+      previousAcceptanceCriteria: session.acceptanceCriteria,
       fetchFileContent,
     });
 
@@ -748,9 +750,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       `Structured implementation plan ready for human review. Change surface estimated as ${analysisResult.implementationPlan.estimatedChangeSurface}.`
     );
 
-    const finalStatus = analysisResult.isBlocked ? 'BLOCKED' : 'PLAN_READY';
-
-    if (finalStatus === 'PLAN_READY') {
+    if (!analysisResult.isBlocked) {
       contributionSessionStore.addTimelineEvent(
         session.id,
         'Waiting For Approval',
@@ -760,15 +760,21 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
       );
     }
 
-    const updatedSession = contributionSessionStore.updateSession(session.id, {
-      analysisStatus: finalStatus,
-      issueIntelligence: analysisResult.issueIntelligence,
-      acceptanceCriteria: analysisResult.acceptanceCriteria,
-      relevantFiles: analysisResult.relevantFiles,
-      blockers: analysisResult.blockers,
-      implementationPlan: analysisResult.implementationPlan,
-      errorMessage: undefined,
-    });
+    // 5. ATOMIC PUBLICATION: publish ONLY when all inspection and quality gates succeed
+    const updatedSession = contributionSessionStore.commitAnalysisAttempt(
+      session.id,
+      attemptId,
+      {
+        repositoryIntelligence,
+        dependencyConfig,
+        issueIntelligence: analysisResult.issueIntelligence,
+        acceptanceCriteria: analysisResult.acceptanceCriteria,
+        relevantFiles: analysisResult.relevantFiles,
+        blockers: analysisResult.blockers,
+        implementationPlan: analysisResult.implementationPlan,
+        isBlocked: analysisResult.isBlocked,
+      }
+    );
 
     res.json({
       success: true,
@@ -776,10 +782,14 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
     });
   } catch (err: any) {
     const errorMsg = err.message || 'Failed during repository and issue analysis.';
-    contributionSessionStore.updateSession(session.id, {
-      analysisStatus: 'FAILED',
-      errorMessage: errorMsg,
-    });
+
+    // Atomically fail attempt and preserve previous plan as historical data
+    const failedSession = contributionSessionStore.failAnalysisAttempt(
+      session.id,
+      attemptId,
+      errorMsg
+    );
+
     contributionSessionStore.addTimelineEvent(
       session.id,
       'Analysis Failed',
@@ -793,6 +803,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
         statusCode: status,
         message: errorMsg,
       },
+      session: failedSession,
     });
   }
 });
@@ -801,6 +812,7 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
  * POST /api/github/contributions/:id/approve
  * Human Approval Gate: Approves the plan.
  * ONLY changes local contribution status to APPROVED.
+ * Strictly enforces approval safety: rejects failed, incomplete, stale, or superseded attempts.
  * Zero writes to GitHub.
  */
 githubRouter.post('/contributions/:id/approve', (req, res) => {
@@ -811,6 +823,34 @@ githubRouter.post('/contributions/:id/approve', (req, res) => {
         classification: 'NOT_FOUND',
         statusCode: 404,
         message: `Contribution session '${req.params.id}' not found.`,
+      },
+    });
+  }
+
+  // Quality & Attempt Gate: Reject approval on failed, incomplete, or blocked analysis attempts
+  if (
+    session.analysisStatus !== 'PLAN_READY' ||
+    session.currentAttemptStatus !== 'SUCCEEDED' ||
+    !session.implementationPlan ||
+    session.blockers.some((b) => b.category !== 'REPOSITORY_ACCESS_LIMITATION')
+  ) {
+    return res.status(400).json({
+      error: {
+        classification: 'AUTHORIZATION_FAILURE',
+        statusCode: 400,
+        message: 'Cannot approve plan: Current analysis attempt is not in PLAN_READY status or has not passed all quality gates.',
+      },
+    });
+  }
+
+  // Stale/superseded attempt gate
+  const requestedAttemptId = req.body?.attemptId;
+  if (requestedAttemptId && session.currentAttemptId && requestedAttemptId !== session.currentAttemptId) {
+    return res.status(409).json({
+      error: {
+        classification: 'AUTHORIZATION_FAILURE',
+        statusCode: 409,
+        message: 'Cannot approve plan: The requested analysis attempt is stale or has been superseded by a newer attempt.',
       },
     });
   }

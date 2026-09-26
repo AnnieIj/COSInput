@@ -81,24 +81,49 @@ export class RealGitHubService implements IGitHubService {
       },
     });
 
-    if (!res.ok) {
-      let errorData: any;
-      try {
-        errorData = await res.json();
-      } catch {
-        errorData = { message: await res.text() };
-      }
+    // Single-read response body: consume stream exactly once via res.text()
+    const bodyText = await res.text();
+    let bodyJson: any = null;
+    let isJson = false;
 
-      const sanitizedError: SanitizedGitHubError = errorData.error || {
-        classification: res.status === 401 ? 'AUTHENTICATION_FAILURE' : res.status === 403 ? 'AUTHORIZATION_FAILURE' : res.status === 404 ? 'NOT_FOUND' : 'GITHUB_SERVICE_FAILURE',
+    if (bodyText && bodyText.trim().length > 0) {
+      try {
+        bodyJson = JSON.parse(bodyText);
+        isJson = true;
+      } catch {
+        bodyJson = null;
+        isJson = false;
+      }
+    }
+
+    if (!res.ok) {
+      const errorData = (isJson && bodyJson) ? bodyJson : { message: bodyText || `Request to ${endpoint} failed with HTTP ${res.status}` };
+
+      const sanitizedError: SanitizedGitHubError & { session?: any } = errorData.error || {
+        classification:
+          res.status === 401
+            ? 'AUTHENTICATION_FAILURE'
+            : res.status === 403
+            ? 'AUTHORIZATION_FAILURE'
+            : res.status === 404
+            ? 'NOT_FOUND'
+            : 'GITHUB_SERVICE_FAILURE',
         statusCode: res.status,
-        message: errorData.message || `Request to ${endpoint} failed with HTTP ${res.status}`,
+        message:
+          errorData.message ||
+          (errorData.error && errorData.error.message) ||
+          bodyText ||
+          `Request to ${endpoint} failed with HTTP ${res.status}`,
       };
+
+      if (errorData.session) {
+        sanitizedError.session = errorData.session;
+      }
 
       throw sanitizedError;
     }
 
-    return (await res.json()) as T;
+    return (bodyJson !== null ? bodyJson : ({} as T)) as T;
   }
 
   async getConnectionStatus() {

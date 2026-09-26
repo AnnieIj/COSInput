@@ -7,6 +7,7 @@
 import { githubServerClient, classifyGitHubError } from './githubClient';
 import { getInstallationAccessToken } from './githubAppAuth';
 import { userAuthStore } from './userAuthStore';
+import { safeParseResponse } from './responseUtils';
 import type {
   GitHubAssignedIssueRef,
   RepositoryAssignmentGroup,
@@ -237,12 +238,13 @@ export class AssignmentSyncService {
       throw error;
     }
 
+    const parsed = await safeParseResponse<{ total_count: number; items: any[] }>(response);
     if (!response.ok) {
-      const errorBody = await response.text();
-      throw classifyGitHubError(response.status, errorBody, response.headers);
+      const errorBody = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorBody), response.headers);
     }
 
-    const data = (await response.json()) as { total_count: number; items: any[] };
+    const data = parsed.json || { total_count: 0, items: [] };
     const rawItems = data.items || [];
 
     // 5. Strictly filter out pull requests and normalize issues

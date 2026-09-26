@@ -284,6 +284,24 @@ export interface ProposedChange {
   necessityExplanation?: string;
   verificationStrategy?: string;
   evidenceSnippet?: string;
+  verificationStatus?: 'VERIFIED' | 'UNVERIFIED';
+  inspectedSha?: string;
+  lineReferences?: string;
+}
+
+export interface HistoricalPlanRecord {
+  attemptId: string;
+  completedAt: string;
+  plan: ImplementationPlan;
+  acceptanceCriteria: AcceptanceCriterion[];
+  status: 'superseded' | 'historical';
+}
+
+export interface VerifiedRepositorySnapshot {
+  timestamp: string;
+  repositoryIntelligence: RepositoryIntelligenceData;
+  dependencyConfig: DependencyConfigAnalysis;
+  status: 'verified';
 }
 
 export interface ImplementationPlan {
@@ -339,6 +357,10 @@ export interface ContributionSession {
   analysisStatus: AnalysisStatus;
   createdTimestamp: string;
   updatedTimestamp: string;
+  currentAttemptId?: string;
+  currentAttemptStatus?: 'NOT_STARTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  lastVerifiedSnapshot?: VerifiedRepositorySnapshot | null;
+  historicalPlans?: HistoricalPlanRecord[];
   repositoryIntelligence: RepositoryIntelligenceData | null;
   issueIntelligence: IssueIntelligenceData | null;
   acceptanceCriteria: AcceptanceCriterion[];

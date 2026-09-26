@@ -1,11 +1,12 @@
 /**
  * COSInput - Real GitHub API Client (Server-Side Proxy Boundary)
  * Handles authenticated communication with GitHub REST API via GitHub App installation tokens.
- * Enforces strict read-only boundaries, error classification, and sanitization.
+ * Enforces strict read-only boundaries, error classification, sanitization, and single-read body handling.
  */
 
 import { generateAppJWT, getInstallationAccessToken } from './githubAppAuth';
 import { getGitHubAppConfig } from './config';
+import { safeParseResponse } from './responseUtils';
 import type {
   GitHubConnectionState,
   SanitizedGitHubError,
@@ -88,12 +89,13 @@ export class GitHubServerClient {
           Authorization: `Bearer ${jwt}`,
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'COSInput-Server/0.2',
+          'User-Agent': 'COSInput-Server/0.3',
         },
       });
 
+      const parsed = await safeParseResponse<any>(response);
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) ? String(parsed.json.message || parsed.json.error) : parsed.text;
         const classified = classifyGitHubError(response.status, errorText, response.headers);
         return {
           configured: true,
@@ -171,16 +173,17 @@ export class GitHubServerClient {
         Authorization: `Bearer ${jwt}`,
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'COSInput-Server/0.2',
+        'User-Agent': 'COSInput-Server/0.3',
       },
     });
 
+    const parsed = await safeParseResponse<any[]>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any[];
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
     return data.map((item) => ({
       id: item.id,
       accountLogin: item.account?.login || 'unknown',
@@ -203,25 +206,27 @@ export class GitHubServerClient {
         Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'COSInput-Server/0.2',
+        'User-Agent': 'COSInput-Server/0.3',
       },
     });
 
+    const parsed = await safeParseResponse<{ total_count: number; repositories: any[] }>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as { total_count: number; repositories: any[] };
+    const data = parsed.json || { total_count: 0, repositories: [] };
+    const repoList = Array.isArray(data.repositories) ? data.repositories : [];
     return {
-      totalCount: data.total_count,
-      repositories: data.repositories.map((repo) => ({
+      totalCount: data.total_count || repoList.length,
+      repositories: repoList.map((repo) => ({
         id: String(repo.id),
         owner: repo.owner?.login || '',
         name: repo.name,
         fullName: repo.full_name,
         description: repo.description || '',
-        isPrivate: repo.private,
+        isPrivate: Boolean(repo.private),
         defaultBranch: repo.default_branch || 'main',
         openIssuesCount: repo.open_issues_count || 0,
         stars: repo.stargazers_count || 0,
@@ -257,17 +262,18 @@ export class GitHubServerClient {
           Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'COSInput-Server/0.2',
+          'User-Agent': 'COSInput-Server/0.3',
         },
       }
     );
 
+    const parsed = await safeParseResponse<any[]>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any[];
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
 
     // CRITICAL: Filter out pull requests returned by the GitHub /issues endpoint!
     const realIssues = data.filter((item) => !item.pull_request);
@@ -311,7 +317,7 @@ export class GitHubServerClient {
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'COSInput-Server/0.2.1',
+      'User-Agent': 'COSInput-Server/0.3',
     };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
@@ -322,12 +328,13 @@ export class GitHubServerClient {
       { headers }
     );
 
+    const parsed = await safeParseResponse<any>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const item = (await response.json()) as any;
+    const item = parsed.json || {};
     if (item.pull_request) {
       throw {
         classification: 'NOT_FOUND',
@@ -375,7 +382,7 @@ export class GitHubServerClient {
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'COSInput-Server/0.2.1',
+      'User-Agent': 'COSInput-Server/0.3',
     };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
@@ -386,12 +393,13 @@ export class GitHubServerClient {
       { headers }
     );
 
+    const parsed = await safeParseResponse<any[]>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any[];
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
     return data.map((c) => ({
       id: String(c.id),
       author: c.user?.login || 'unknown',
@@ -437,14 +445,15 @@ export class GitHubServerClient {
     }
 
     const response = await fetch(url.toString(), { headers });
+    const parsed = await safeParseResponse<any>(response);
 
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any;
-    if (data.type !== 'file') {
+    const data = parsed.json;
+    if (!data || data.type !== 'file') {
       throw {
         classification: 'NOT_FOUND',
         statusCode: 400,
@@ -500,13 +509,14 @@ export class GitHubServerClient {
     }
 
     const response = await fetch(url.toString(), { headers });
+    const parsed = await safeParseResponse<any>(response);
 
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any;
+    const data = parsed.json;
     if (!Array.isArray(data)) {
       throw {
         classification: 'NOT_FOUND',
@@ -552,25 +562,27 @@ export class GitHubServerClient {
     }
 
     const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
+    const parsed = await safeParseResponse<any>(response);
+
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any;
+    const data = parsed.json || {};
     return {
-      id: String(data.id),
+      id: String(data.id || ''),
       owner: data.owner?.login || owner,
-      name: data.name,
-      fullName: data.full_name,
+      name: data.name || repo,
+      fullName: data.full_name || `${owner}/${repo}`,
       description: data.description || '',
       isPrivate: Boolean(data.private),
       defaultBranch: data.default_branch || 'main',
       openIssuesCount: data.open_issues_count || 0,
       stars: data.stargazers_count || 0,
       forks: data.forks_count || 0,
-      updatedAt: data.updated_at,
-      htmlUrl: data.html_url,
+      updatedAt: data.updated_at || new Date().toISOString(),
+      htmlUrl: data.html_url || `https://github.com/${owner}/${repo}`,
       language: data.language || '',
       permissions: data.permissions || {},
     };
@@ -609,15 +621,16 @@ export class GitHubServerClient {
       { headers }
     );
 
+    const parsed = await safeParseResponse<any>(response);
     if (!response.ok) {
-      const err = await response.text();
-      throw classifyGitHubError(response.status, err, response.headers);
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers);
     }
 
-    const data = (await response.json()) as any;
+    const data = parsed.json || {};
     const tree = Array.isArray(data.tree) ? data.tree : [];
     return {
-      sha: data.sha,
+      sha: data.sha || '',
       truncated: Boolean(data.truncated),
       tree: tree.map((item: any) => ({
         path: item.path,

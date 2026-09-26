@@ -6,6 +6,7 @@
 
 import crypto from 'crypto';
 import { getGitHubAppConfig } from './config';
+import { safeParseResponse } from './responseUtils';
 import type { CachedInstallationToken, SanitizedGitHubError } from './types';
 
 // In-memory cache for installation access tokens: installationId -> { token, expiresAt }
@@ -104,14 +105,15 @@ export async function getInstallationAccessToken(installationId: number): Promis
     }
   );
 
+  const parsed = await safeParseResponse<{ token: string; expires_at: string }>(response);
   if (!response.ok) {
-    const errorBody = await response.text();
+    const errorBody = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
     throw new Error(
       `Failed to obtain installation access token for installation #${installationId}. HTTP ${response.status}: ${errorBody}`
     );
   }
 
-  const data = (await response.json()) as { token: string; expires_at: string };
+  const data = parsed.json || { token: '', expires_at: new Date(Date.now() + 3600000).toISOString() };
   const expiresAt = new Date(data.expires_at).getTime();
 
   tokenCache.set(installationId, {
