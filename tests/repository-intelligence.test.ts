@@ -141,54 +141,60 @@ describe('COSInput Foundation v0.3 — Repository Intelligence & Issue Analysis'
       vi.spyOn(githubServerClient, 'getFileContent').mockImplementation(
         async (_instId, _owner, _repo, path) => {
           if (path === 'AGENTS.md') {
+            const content =
+              '# Agent Directives\n- Never modify src/contracts/generated.ts\n- Always run npm test before proposing changes\n- Follow atomic commit message rules';
             return {
               name: 'AGENTS.md',
               path: 'AGENTS.md',
               sha: 'blob2',
               size: 500,
               type: 'file',
-              content:
-                '# Agent Directives\n- Never modify src/contracts/generated.ts\n- Always run npm test before proposing changes\n- Follow atomic commit message rules',
+              content,
               encoding: 'utf-8',
+              lineCount: content.split('\n').length,
             };
           }
           if (path === 'CONTRIBUTING.md') {
+            const content =
+              '# Contributing Guidelines\n- Branch naming: feat/* or fix/*\n- Run npm run lint before opening PR';
             return {
               name: 'CONTRIBUTING.md',
               path: 'CONTRIBUTING.md',
               sha: 'blob3',
               size: 400,
               type: 'file',
-              content:
-                '# Contributing Guidelines\n- Branch naming: feat/* or fix/*\n- Run npm run lint before opening PR',
+              content,
               encoding: 'utf-8',
+              lineCount: content.split('\n').length,
             };
           }
           if (path === 'package.json') {
+            const content = JSON.stringify({
+              name: 'stellar-frontend',
+              scripts: {
+                test: 'vitest run',
+                lint: 'eslint .',
+                build: 'vite build',
+              },
+              dependencies: {
+                react: '^19.0.0',
+                vite: '^6.0.0',
+              },
+              devDependencies: {
+                vitest: '^3.0.0',
+                eslint: '^9.0.0',
+                typescript: '^5.0.0',
+              },
+            });
             return {
               name: 'package.json',
               path: 'package.json',
               sha: 'blob4',
               size: 300,
               type: 'file',
-              content: JSON.stringify({
-                name: 'stellar-frontend',
-                scripts: {
-                  test: 'vitest run',
-                  lint: 'eslint .',
-                  build: 'vite build',
-                },
-                dependencies: {
-                  react: '^19.0.0',
-                  vite: '^6.0.0',
-                },
-                devDependencies: {
-                  vitest: '^3.0.0',
-                  eslint: '^9.0.0',
-                  typescript: '^5.0.0',
-                },
-              }),
+              content,
               encoding: 'utf-8',
+              lineCount: content.split('\n').length,
             };
           }
           return {
@@ -199,6 +205,7 @@ describe('COSInput Foundation v0.3 — Repository Intelligence & Issue Analysis'
             type: 'file',
             content: '',
             encoding: 'utf-8',
+            lineCount: 1,
           };
         }
       );
@@ -840,6 +847,12 @@ The swipe animation stutters when dragging quickly on mobile viewports.
         'src/api/signals.ts': `
           export async function getSignals(search, filter) {
             return fetch('/api/signals?q=' + search);
+          }
+        `,
+        'src/tests/SignalList.test.tsx': `
+          import { render } from '@testing-library/react';
+          export function testSignalList() {
+            it('renders initial list', () => {});
           }
         `,
       };
