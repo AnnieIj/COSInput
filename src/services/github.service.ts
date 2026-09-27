@@ -364,6 +364,40 @@ export class RealGitHubService implements IGitHubService {
     );
   }
 
+  // v0.4.2 Controlled Issue Implementation Runner APIs
+  async getExecutionPreview(id: string): Promise<{ success: boolean; preview: any }> {
+    return this.fetchApi<{ success: boolean; preview: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/runner/preview`
+    );
+  }
+
+  async startExecution(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/runner/start`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async stopExecution(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/runner/stop`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async resetExecution(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/runner/reset`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
   // Strictly disabled in active v0.2/v0.3 UI
   async createBranch(_owner: string, _repo: string, _branchName: string, _baseSha: string): Promise<{ ref: string; sha: string }> {
     throw new Error('Write operations are forbidden in COSInput Foundation v0.2. Read-only foundation active.');

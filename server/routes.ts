@@ -13,6 +13,7 @@ import { contributionSessionStore } from './contributionSessionStore';
 import { repositoryIntelligenceService } from './repositoryIntelligenceService';
 import { issueAnalysisService } from './issueAnalysisService';
 import { workspacePreparationService } from './workspacePreparationService';
+import { implementationRunnerService } from './implementationRunnerService';
 import type { SanitizedGitHubError } from './types';
 
 export const githubRouter = Router();
@@ -1014,3 +1015,96 @@ githubRouter.post('/contributions/:id/approve-branch', async (req, res) => {
     });
   }
 });
+
+/**
+ * GET /api/github/contributions/:id/runner/preview
+ * Returns implementation preview containing proposed files, commands, and eligibility.
+ */
+githubRouter.get('/contributions/:id/runner/preview', async (req, res) => {
+  try {
+    const preview = await implementationRunnerService.getExecutionPreview(req.params.id);
+    res.json({
+      success: true,
+      preview,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to generate implementation preview.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/runner/start
+ * Human Approval Gate: Starts controlled implementation run on isolated workspace branch.
+ */
+githubRouter.post('/contributions/:id/runner/start', async (req, res) => {
+  try {
+    const updated = await implementationRunnerService.startExecution(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to start controlled implementation runner.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/runner/stop
+ * Halts active implementation execution run immediately.
+ */
+githubRouter.post('/contributions/:id/runner/stop', async (req, res) => {
+  try {
+    const updated = await implementationRunnerService.stopExecution(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to stop implementation runner.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/runner/reset
+ * Resets execution state for safe retry.
+ */
+githubRouter.post('/contributions/:id/runner/reset', async (req, res) => {
+  try {
+    const updated = await implementationRunnerService.resetExecution(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to reset implementation execution.',
+      },
+    });
+  }
+});
+

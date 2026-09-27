@@ -11,6 +11,9 @@ import type {
   BlockerItem,
   RepositoryInstructionItem,
   SanitizedGitHubError,
+  ImplementationPreview,
+  ImplementationRunState,
+  ExecutionStatus,
 } from '../services/types';
 
 export const WorkspacePage: React.FC = () => {
@@ -26,7 +29,7 @@ export const WorkspacePage: React.FC = () => {
 
   // Tab navigation inside workspace
   const [activeTab, setActiveTab] = useState<
-    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers' | 'workspace'
+    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers' | 'workspace' | 'runner'
   >('plan');
 
   // Human Approval Feedback modal state
@@ -36,6 +39,12 @@ export const WorkspacePage: React.FC = () => {
   const [preparingWorkspace, setPreparingWorkspace] = useState<boolean>(false);
   const [creatingFork, setCreatingFork] = useState<boolean>(false);
   const [creatingBranch, setCreatingBranch] = useState<boolean>(false);
+
+  // Implementation Runner state
+  const [previewData, setPreviewData] = useState<ImplementationPreview | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState<boolean>(false);
+  const [startingExecution, setStartingExecution] = useState<boolean>(false);
+  const [stoppingExecution, setStoppingExecution] = useState<boolean>(false);
 
   // Load contribution session from server
   const loadSession = useCallback(async () => {
@@ -291,6 +300,90 @@ export const WorkspacePage: React.FC = () => {
       );
     } finally {
       setCreatingBranch(false);
+    }
+  };
+
+  const loadExecutionPreview = async () => {
+    if (!session) return;
+    setLoadingPreview(true);
+    setError(null);
+    try {
+      if (isLive) {
+        const res = await githubService.getExecutionPreview(session.id);
+        if (res.success && res.preview) {
+          setPreviewData(res.preview);
+        }
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'AUTHORIZATION_FAILURE',
+              statusCode: err.statusCode || 500,
+              message: err.message || 'Failed to load implementation preview.',
+            }
+      );
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  const handleStartExecution = async () => {
+    if (!session) return;
+    setStartingExecution(true);
+    setError(null);
+    try {
+      if (isLive) {
+        const res = await githubService.startExecution(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err.statusCode || 500,
+              message: err.message || 'Failed to start controlled implementation runner.',
+            }
+      );
+    } finally {
+      setStartingExecution(false);
+    }
+  };
+
+  const handleStopExecution = async () => {
+    if (!session) return;
+    setStoppingExecution(true);
+    try {
+      if (isLive) {
+        const res = await githubService.stopExecution(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      }
+    } catch (err: any) {
+      setError(err);
+    } finally {
+      setStoppingExecution(false);
+    }
+  };
+
+  const handleResetExecution = async () => {
+    if (!session) return;
+    try {
+      if (isLive) {
+        const res = await githubService.resetExecution(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+          loadExecutionPreview();
+        }
+      }
+    } catch (err: any) {
+      setError(err);
     }
   };
 
@@ -749,6 +842,111 @@ export const WorkspacePage: React.FC = () => {
         </div>
       )}
 
+      {/* v0.4.2 Implementation Runner Banners */}
+      {session && session.workspacePreparation?.status === 'WORKSPACE_READY' && !session.executionRun && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-tertiary-container/20 border border-tertiary/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-tertiary-container text-on-tertiary flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">play_arrow</span>
+              </div>
+              <div>
+                <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                  Isolated Workspace Ready for Implementation
+                </span>
+                <span className="font-body-sm text-body-sm text-secondary">
+                  Fork and branch are isolated. Open the controlled runner to inspect the implementation preview and start local execution.
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('runner');
+                if (!previewData) loadExecutionPreview();
+              }}
+              className="px-5 py-2 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 cursor-pointer shrink-0"
+            >
+              <span className="material-symbols-outlined text-[18px]">play_circle</span>
+              <span>Open Execution Runner</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {session && session.executionRun && ['EXECUTING', 'VERIFYING', 'REPAIRING'].includes(session.executionRun.status) && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-primary-fixed/30 border border-primary/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-primary-container text-on-primary flex items-center justify-center shrink-0 animate-pulse">
+                <span className="material-symbols-outlined text-[20px]">sync</span>
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    Controlled Implementation Runner Active
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-primary-container text-on-primary">
+                    {session.executionRun.status}
+                  </span>
+                </div>
+                <span className="font-body-sm text-body-sm text-secondary">
+                  Applying grounded changes and running local verification suite (Zero remote push).
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleStopExecution}
+                disabled={stoppingExecution}
+                className="px-3.5 py-2 rounded-lg bg-error-container text-on-error font-label-md text-label-md font-semibold hover:opacity-90 cursor-pointer shrink-0"
+              >
+                Stop Execution
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('runner')}
+                className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow hover:opacity-90 cursor-pointer shrink-0"
+              >
+                <span>View Runner Console</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {session && session.executionRun?.status === 'SUCCEEDED' && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
+          <div className="p-4 rounded-xl bg-tertiary-container/30 border border-tertiary/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-full bg-tertiary-container text-on-tertiary flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">verified</span>
+              </div>
+              <div>
+                <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                  Local Implementation & Verification Succeeded
+                </span>
+                <span className="font-body-sm text-body-sm text-secondary">
+                  All tests, typecheck, lint, and acceptance criteria verified locally. Zero remote git push.
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('runner')}
+              className="px-5 py-2 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 cursor-pointer shrink-0"
+            >
+              <span className="material-symbols-outlined text-[18px]">fact_check</span>
+              <span>Review Implementation Report</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 4. Main Body: Split Layout (Main Content + Right Side Panel) */}
       <main className="max-w-7xl mx-auto w-full px-4 lg:px-8 py-6 flex-1">
         {loading && (
@@ -868,6 +1066,30 @@ export const WorkspacePage: React.FC = () => {
                   <span>Isolated Workspace</span>
                   {session.workspacePreparation?.status === 'WORKSPACE_READY' && (
                     <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('runner');
+                    if (!previewData && session.workspacePreparation?.status === 'WORKSPACE_READY') {
+                      loadExecutionPreview();
+                    }
+                  }}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'runner'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">play_circle</span>
+                  <span>Execution Runner</span>
+                  {session.executionRun?.status === 'SUCCEEDED' && (
+                    <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+                  )}
+                  {session.executionRun && ['EXECUTING', 'VERIFYING', 'REPAIRING'].includes(session.executionRun.status) && (
+                    <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
                   )}
                 </button>
               </div>
@@ -1615,6 +1837,421 @@ export const WorkspacePage: React.FC = () => {
                           <span className="material-symbols-outlined text-[18px]">terminal</span>
                           <span>{preparingWorkspace ? 'Preparing Workspace...' : 'Prepare Isolated Workspace'}</span>
                         </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 8: Implementation Runner (v0.4.2) */}
+              {activeTab === 'runner' && (
+                <div className="space-y-5">
+                  {session.workspacePreparation?.status !== 'WORKSPACE_READY' ? (
+                    <div className="bg-surface-container-lowest rounded-xl p-8 border border-surface-container shadow-sm text-center space-y-4">
+                      <span className="material-symbols-outlined text-outline text-[48px]">terminal</span>
+                      <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                        Workspace Preparation Required First
+                      </h3>
+                      <p className="font-body-md text-body-md text-secondary max-w-md mx-auto">
+                        Before running the implementation runner, complete the contributor fork discovery and branch preparation in the Isolated Workspace tab.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('workspace')}
+                        className="px-5 py-2.5 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 mx-auto shadow hover:opacity-90 cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-[18px]">terminal</span>
+                        <span>Go to Isolated Workspace</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+                      {/* Runner Header */}
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-surface-container-low pb-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-primary-container text-on-primary flex items-center justify-center shrink-0 shadow-sm">
+                            <span className="material-symbols-outlined text-[24px]">play_circle</span>
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                                Controlled Implementation Runner
+                              </h2>
+                              {session.executionRun ? (
+                                <span
+                                  className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-bold uppercase ${
+                                    session.executionRun.status === 'SUCCEEDED'
+                                      ? 'bg-tertiary-container text-on-tertiary'
+                                      : session.executionRun.status === 'STOPPED'
+                                      ? 'bg-surface-container-high text-secondary'
+                                      : session.executionRun.status === 'FAILED'
+                                      ? 'bg-error-container text-on-error'
+                                      : 'bg-primary-container text-on-primary animate-pulse'
+                                  }`}
+                                >
+                                  {session.executionRun.status}
+                                </span>
+                              ) : (
+                                <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold uppercase bg-surface-container text-on-surface">
+                                  READY FOR PREVIEW
+                                </span>
+                              )}
+                            </div>
+                            <span className="font-body-sm text-body-sm text-secondary block mt-0.5">
+                              Branch: <code>{session.workspacePreparation.branchName}</code> (Fork: {session.workspacePreparation.contributorFork?.fullName || 'Isolated'})
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 flex-wrap">
+                          {session.executionRun && ['EXECUTING', 'VERIFYING', 'REPAIRING'].includes(session.executionRun.status) ? (
+                            <button
+                              type="button"
+                              onClick={handleStopExecution}
+                              disabled={stoppingExecution}
+                              className="px-4 py-2 rounded-lg bg-error-container text-on-error font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow hover:opacity-90 cursor-pointer disabled:opacity-50"
+                            >
+                              <span className="material-symbols-outlined text-[18px]">stop_circle</span>
+                              <span>{stoppingExecution ? 'Stopping...' : 'Stop Execution'}</span>
+                            </button>
+                          ) : session.executionRun ? (
+                            <button
+                              type="button"
+                              onClick={handleResetExecution}
+                              className="px-3.5 py-2 rounded-lg bg-surface-container-low hover:bg-surface-container text-on-surface font-label-md text-label-md font-semibold border border-surface-container flex items-center gap-1.5 transition-colors cursor-pointer"
+                            >
+                              <span className="material-symbols-outlined text-[16px]">restart_alt</span>
+                              <span>Reset Execution</span>
+                            </button>
+                          ) : null}
+
+                          <button
+                            type="button"
+                            onClick={loadExecutionPreview}
+                            disabled={loadingPreview}
+                            className="px-3.5 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold border border-surface-container flex items-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">refresh</span>
+                            <span>{loadingPreview ? 'Refreshing...' : 'Refresh Preview'}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Invariant Boundaries Callout */}
+                      <div className="p-3.5 rounded-xl bg-surface-container-low border border-surface-container flex items-start gap-2.5 text-body-sm text-secondary">
+                        <span className="material-symbols-outlined text-tertiary text-[18px] mt-0.5 shrink-0">verified_user</span>
+                        <div>
+                          <strong className="text-on-surface">Execution Boundaries:</strong> Modifications execute strictly within the prepared contributor workspace. Zero upstream pushes, no remote pull requests, and no automated CI Guardian triggers are executed in this milestone.
+                        </div>
+                      </div>
+
+                      {/* Plan Discrepancy Error Card (Section 3) */}
+                      {session.executionRun?.planDiscrepancy && (
+                        <div className="p-4 rounded-xl bg-error-container/20 border border-error/30 space-y-2">
+                          <div className="flex items-center gap-2 text-error font-headline-sm text-headline-sm font-bold">
+                            <span className="material-symbols-outlined text-[20px]">report_problem</span>
+                            <span>Grounded Plan Discrepancy Detected</span>
+                          </div>
+                          <p className="font-body-sm text-body-sm text-on-surface">
+                            {session.executionRun.planDiscrepancy.details}
+                          </p>
+                          <div className="text-code-sm font-code-sm text-secondary">
+                            Target File: <code>{session.executionRun.planDiscrepancy.file}</code> (Grounded runner refused to invent speculative files).
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Implementation Preview Card (Section 4) */}
+                      {!session.executionRun && (
+                        <div className="space-y-6">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {/* Proposed Modifications */}
+                            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                              <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                                Proposed File Modifications ({session.implementationPlan?.proposedChanges.length || 0})
+                              </span>
+                              <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                {(session.implementationPlan?.proposedChanges || []).map((ch, idx) => (
+                                  <div key={idx} className="p-2.5 rounded bg-surface-container-lowest border border-surface-container space-y-1">
+                                    <div className="flex items-center justify-between">
+                                      <code className="text-primary font-mono text-xs font-semibold">{ch.targetFile}</code>
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-surface-container text-secondary">
+                                        {ch.changeRole || 'MOD'}
+                                      </span>
+                                    </div>
+                                    <p className="font-body-xs text-xs text-on-surface">{ch.description}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Planned Verification Commands */}
+                            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                              <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                                Derived Local Verification Suite (Section 5)
+                              </span>
+                              <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                {(previewData?.plannedVerificationCommands || [
+                                  { type: 'test', command: 'npm test', reason: 'Execute test suite' },
+                                  { type: 'typecheck', command: 'npx tsc --noEmit', reason: 'Static typecheck' },
+                                  { type: 'lint', command: 'npm run lint', reason: 'Linter verification' },
+                                  { type: 'build', command: 'npm run build', reason: 'Production build' },
+                                ]).map((cmd, idx) => (
+                                  <div key={idx} className="p-2.5 rounded bg-surface-container-lowest border border-surface-container space-y-1">
+                                    <div className="flex items-center justify-between">
+                                      <code className="text-on-surface font-mono text-xs font-bold">{cmd.command}</code>
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-tertiary-container/30 text-tertiary font-bold">
+                                        {cmd.type}
+                                      </span>
+                                    </div>
+                                    <p className="font-body-xs text-xs text-secondary">{cmd.reason}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Explicit Human Approval Gate */}
+                          <div className="p-5 rounded-xl bg-primary-fixed/20 border border-primary/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            <div className="flex items-start gap-3">
+                              <span className="material-symbols-outlined text-primary text-[24px] mt-0.5 shrink-0">fact_check</span>
+                              <div className="space-y-1">
+                                <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                                  Human Approval Gate: Execute Grounded Changes
+                                </span>
+                                <p className="font-body-sm text-body-sm text-secondary">
+                                  Explicit human approval is required before the controlled runner begins source modification and local verification.
+                                </p>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              disabled={startingExecution}
+                              onClick={handleStartExecution}
+                              className="px-6 py-3 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow-md hover:opacity-90 disabled:opacity-50 cursor-pointer shrink-0"
+                            >
+                              <span className="material-symbols-outlined text-[20px]">play_circle</span>
+                              <span>{startingExecution ? 'Executing Grounded Plan...' : 'Approve & Start Implementation'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Active Execution & Logs Console */}
+                      {session.executionRun && (
+                        <div className="space-y-6">
+                          {/* Live Console Output */}
+                          <div className="p-4 rounded-xl bg-surface-container-lowest border border-surface-container space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2 text-on-surface font-headline-sm text-headline-sm font-semibold">
+                                <span className="material-symbols-outlined text-primary text-[20px]">terminal</span>
+                                <span>Execution Stream & Logs</span>
+                              </div>
+                              <span className="font-code-sm text-code-sm text-secondary font-mono">
+                                Run ID: {session.executionRun.id}
+                              </span>
+                            </div>
+
+                            <div className="bg-black text-gray-200 font-mono text-xs p-4 rounded-lg space-y-1.5 max-h-64 overflow-y-auto">
+                              {(session.executionRun.logs || []).map((log, idx) => (
+                                <div key={idx} className="flex items-start gap-2">
+                                  <span className="text-gray-500 shrink-0">
+                                    {new Date(log.timestamp).toLocaleTimeString()}
+                                  </span>
+                                  <span
+                                    className={`font-bold shrink-0 ${
+                                      log.level === 'error'
+                                        ? 'text-red-400'
+                                        : log.level === 'warn'
+                                        ? 'text-yellow-400'
+                                        : log.level === 'success'
+                                        ? 'text-green-400'
+                                        : 'text-blue-400'
+                                    }`}
+                                  >
+                                    [{log.step}]
+                                  </span>
+                                  <span className="break-all">{log.message}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Review Generated Diff */}
+                          {session.executionRun.generatedDiff && (
+                            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-on-surface font-headline-sm text-headline-sm font-semibold">
+                                  <span className="material-symbols-outlined text-tertiary text-[20px]">difference</span>
+                                  <span>Generated Working Tree Diff</span>
+                                </div>
+                                <span className="font-code-sm text-code-sm text-secondary">
+                                  {session.executionRun.modifiedFiles.length} file(s) modified
+                                </span>
+                              </div>
+
+                              <pre className="bg-black text-green-300 font-mono text-xs p-4 rounded-lg overflow-x-auto whitespace-pre leading-relaxed">
+                                {session.executionRun.generatedDiff}
+                              </pre>
+                            </div>
+                          )}
+
+                          {/* Section 5: Local Verification Results Suite */}
+                          <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                            <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                              Local Verification Suite Results
+                            </span>
+
+                            <div className="space-y-2">
+                              {(session.executionRun.verificationResults || []).map((vr) => (
+                                <div
+                                  key={vr.id}
+                                  className="p-3 rounded-lg bg-surface-container-lowest border border-surface-container flex flex-col md:flex-row md:items-center justify-between gap-3"
+                                >
+                                  <div className="flex items-center gap-2.5">
+                                    <span
+                                      className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
+                                        vr.passed
+                                          ? 'bg-tertiary-container text-on-tertiary'
+                                          : 'bg-error-container text-on-error'
+                                      }`}
+                                    >
+                                      {vr.passed ? '✓' : '✗'}
+                                    </span>
+                                    <div>
+                                      <code className="text-on-surface font-mono text-xs font-bold">
+                                        {vr.command}
+                                      </code>
+                                      <p className="font-body-xs text-xs text-secondary">{vr.outputSummary}</p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-3 font-code-sm text-xs shrink-0">
+                                    <span className="text-secondary">Exit: <strong>{vr.exitCode}</strong></span>
+                                    <span
+                                      className={`px-2 py-0.5 rounded font-bold uppercase text-[10px] ${
+                                        vr.passed
+                                          ? 'bg-tertiary-container/30 text-tertiary'
+                                          : 'bg-error-container/30 text-error'
+                                      }`}
+                                    >
+                                      {vr.passed ? 'PASSED' : 'FAILED'}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Section 6: Bounded Local Repair Card */}
+                          {session.executionRun.repairAttempts && session.executionRun.repairAttempts.length > 0 && (
+                            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-3">
+                              <div className="flex items-center gap-2 text-on-surface font-headline-sm text-headline-sm font-semibold">
+                                <span className="material-symbols-outlined text-amber-500 text-[20px]">build_circle</span>
+                                <span>Bounded Local Repair History ({session.executionRun.repairAttempts.length} / {session.executionRun.maxRepairs})</span>
+                              </div>
+
+                              <div className="space-y-2">
+                                {session.executionRun.repairAttempts.map((rep) => (
+                                  <div key={rep.attemptNumber} className="p-3 rounded-lg bg-surface-container-lowest border border-surface-container space-y-1">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-bold text-xs text-on-surface">Attempt #{rep.attemptNumber} ({rep.failedVerificationType})</span>
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${rep.rerunPassed ? 'bg-tertiary-container text-on-tertiary' : 'bg-error-container text-on-error'}`}>
+                                        {rep.rerunPassed ? 'RERUN PASSED' : 'RERUN FAILED'}
+                                      </span>
+                                    </div>
+                                    <p className="font-body-xs text-xs text-secondary">Correction: {rep.correctionApplied}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Acceptance Criteria Evidence (Section 5 & 7) */}
+                          <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                            <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                              Acceptance Criteria Implementation Evidence
+                            </span>
+
+                            <div className="space-y-2">
+                              {(session.executionRun.acceptanceCriteriaEvidence || []).map((ace) => (
+                                <div
+                                  key={ace.criterionId}
+                                  className="p-3 rounded-lg bg-surface-container-lowest border border-surface-container flex items-start gap-3"
+                                >
+                                  <span
+                                    className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold mt-0.5 shrink-0 ${
+                                      ace.verified
+                                        ? 'bg-tertiary-container text-on-tertiary'
+                                        : 'bg-error-container text-on-error'
+                                    }`}
+                                  >
+                                    {ace.verified ? '✓' : '✗'}
+                                  </span>
+                                  <div className="space-y-1">
+                                    <span className="font-bold text-xs text-on-surface block">
+                                      {ace.description}
+                                    </span>
+                                    <p className="font-body-xs text-xs text-secondary">
+                                      Evidence: {ace.evidence}
+                                    </p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Section 7: Final Report & Next Approval */}
+                          {session.executionRun.finalReport && (
+                            <div className="p-5 rounded-xl bg-surface-container-lowest border-2 border-tertiary/40 space-y-4">
+                              <div className="flex items-center justify-between border-b border-surface-container-low pb-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="material-symbols-outlined text-tertiary text-[22px]">assignment_turned_in</span>
+                                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                                    Controlled Implementation Final Report
+                                  </h3>
+                                </div>
+                                <span className={`px-2.5 py-1 rounded text-xs font-bold font-mono uppercase ${
+                                  session.executionRun.finalReport.actualResults === 'SUCCESS'
+                                    ? 'bg-tertiary-container text-on-tertiary'
+                                    : 'bg-error-container text-on-error'
+                                }`}>
+                                  RESULT: {session.executionRun.finalReport.actualResults}
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-body-sm text-body-sm">
+                                <div className="p-3 rounded bg-surface-container-low space-y-1">
+                                  <span className="font-bold text-secondary text-xs uppercase block">Changed Files:</span>
+                                  <ul className="list-disc list-inside text-on-surface font-mono text-xs">
+                                    {session.executionRun.finalReport.changedFiles.map((f, i) => (
+                                      <li key={i}>{f}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+
+                                <div className="p-3 rounded bg-surface-container-low space-y-1">
+                                  <span className="font-bold text-secondary text-xs uppercase block">Tests Executed:</span>
+                                  <span className="text-on-surface font-mono text-xs">
+                                    {session.executionRun.finalReport.testsPerformed.length} local verification commands executed
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Next Required Human Approval Gate */}
+                              <div className="p-4 rounded-xl bg-tertiary-container/20 border border-tertiary/30 space-y-1">
+                                <div className="flex items-center gap-2 text-tertiary font-bold text-xs uppercase tracking-wide">
+                                  <span className="material-symbols-outlined text-[16px]">lock</span>
+                                  <span>Next Required Human Approval</span>
+                                </div>
+                                <p className="font-body-sm text-body-sm text-on-surface font-semibold">
+                                  {session.executionRun.finalReport.nextRequiredHumanApproval}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
                   )}

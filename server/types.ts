@@ -429,4 +429,139 @@ export interface ContributionSession {
   };
   activityTimeline: ActivityTimelineItem[];
   errorMessage?: string;
+  executionRun?: ImplementationRunState | null;
+}
+
+export type ExecutionStatus =
+  | 'NOT_STARTED'
+  | 'PREVIEW_READY'
+  | 'APPROVAL_REQUIRED'
+  | 'EXECUTING'
+  | 'VERIFYING'
+  | 'REPAIRING'
+  | 'STOPPED'
+  | 'FAILED'
+  | 'SUCCEEDED';
+
+export interface ImplementationPreview {
+  upstreamRepository: string;
+  issueNumber: number;
+  issueTitle: string;
+  executionRunId: string;
+  selectedBranch: string;
+  baseBranch: string;
+  baseCommitSha: string;
+  approvedPlanVersion: string;
+  filesProposed: {
+    path: string;
+    description: string;
+    changeRole: string;
+    mappedCriteriaIds: string[];
+  }[];
+  plannedVerificationCommands: {
+    type: 'test' | 'typecheck' | 'lint' | 'build';
+    command: string;
+    reason: string;
+  }[];
+  eligibilityCheck: {
+    eligible: boolean;
+    reasons: string[];
+  };
+}
+
+export interface ExecutionLogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error' | 'success';
+  message: string;
+  step: string;
+}
+
+export interface ModifiedFileResult {
+  path: string;
+  status: 'modified' | 'created' | 'deleted';
+  diffSummary: string;
+  originalLength: number;
+  modifiedLength: number;
+}
+
+export interface VerificationResultItem {
+  id: string;
+  type: 'diff_review' | 'test' | 'typecheck' | 'lint' | 'build';
+  command: string;
+  exitCode: number;
+  outputSummary: string;
+  passed: boolean;
+  timestamp: string;
+  durationMs: number;
+}
+
+export interface AcceptanceCriterionEvidence {
+  criterionId: string;
+  description: string;
+  verified: boolean;
+  evidence: string;
+  commandUsed?: string;
+}
+
+export interface RepairAttemptRecord {
+  attemptNumber: number;
+  failedVerificationType: string;
+  identifiedError: string;
+  targetSource: string;
+  correctionApplied: string;
+  rerunPassed: boolean;
+  timestamp: string;
+}
+
+export interface PlanDiscrepancy {
+  type: 'MISSING_FILE' | 'INCOMPATIBLE_CODE' | 'UNRESOLVED_DEPENDENCY';
+  file: string;
+  details: string;
+  detectedAt: string;
+}
+
+export interface ImplementationFinalReport {
+  executionRunId: string;
+  upstreamRepository: string;
+  branchName: string;
+  changedFiles: string[];
+  implementedFunctionality: string[];
+  testsPerformed: {
+    command: string;
+    exitCode: number;
+    summary: string;
+    passed: boolean;
+  }[];
+  acceptanceEvidence: {
+    criterionId: string;
+    criterion: string;
+    status: 'VERIFIED' | 'FAILED';
+    evidence: string;
+  }[];
+  actualResults: 'SUCCESS' | 'FAILED' | 'REPAIR_EXHAUSTED' | 'STOPPED';
+  unresolvedLimitations: string[];
+  nextRequiredHumanApproval: string;
+  completedAt: string;
+}
+
+export interface ImplementationRunState {
+  id: string;
+  sessionId: string;
+  status: ExecutionStatus;
+  preview: ImplementationPreview;
+  startedAt?: string;
+  completedAt?: string;
+  stoppedAt?: string;
+  stopRequested?: boolean;
+  logs: ExecutionLogEntry[];
+  generatedDiff?: string;
+  modifiedFiles: ModifiedFileResult[];
+  verificationResults: VerificationResultItem[];
+  acceptanceCriteriaEvidence: AcceptanceCriterionEvidence[];
+  repairAttempts: RepairAttemptRecord[];
+  repairCount: number;
+  maxRepairs: number;
+  planDiscrepancy?: PlanDiscrepancy | null;
+  finalReport?: ImplementationFinalReport | null;
+  errorMessage?: string;
 }
