@@ -26,13 +26,16 @@ export const WorkspacePage: React.FC = () => {
 
   // Tab navigation inside workspace
   const [activeTab, setActiveTab] = useState<
-    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers'
+    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers' | 'workspace'
   >('plan');
 
   // Human Approval Feedback modal state
   const [showRevisionModal, setShowRevisionModal] = useState<boolean>(false);
   const [revisionFeedback, setRevisionFeedback] = useState<string>('');
   const [approving, setApproving] = useState<boolean>(false);
+  const [preparingWorkspace, setPreparingWorkspace] = useState<boolean>(false);
+  const [creatingFork, setCreatingFork] = useState<boolean>(false);
+  const [creatingBranch, setCreatingBranch] = useState<boolean>(false);
 
   // Load contribution session from server
   const loadSession = useCallback(async () => {
@@ -175,6 +178,119 @@ export const WorkspacePage: React.FC = () => {
       alert(`Approval error: ${err.message || 'Failed to record approval.'}`);
     } finally {
       setApproving(false);
+    }
+  };
+
+  const handlePrepareWorkspace = async () => {
+    if (!session) return;
+    setPreparingWorkspace(true);
+    setError(null);
+    try {
+      if (isLive) {
+        const res = await githubService.prepareWorkspace(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+          setActiveTab('workspace');
+        }
+      } else {
+        // Deterministic demo workspace prep
+        setSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                preparationStatus: 'WORKSPACE_READY',
+                workspacePreparation: {
+                  executionRunId: `run-${Date.now()}`,
+                  status: 'WORKSPACE_READY',
+                  contributorIdentity: prev.contributorUsername,
+                  upstreamRepository: prev.upstreamRepository,
+                  selectedIssueNumber: prev.issueNumber,
+                  approvedAnalysisAttemptId: prev.currentAttemptId || 'attempt-1',
+                  approvedPlanVersion: 'v1-demo',
+                  baseBranch: 'main',
+                  baseCommitSha: 'a1b2c3d4e5f6',
+                  contributorFork: {
+                    owner: prev.contributorUsername,
+                    name: prev.repositoryName,
+                    fullName: `${prev.contributorUsername}/${prev.repositoryName}`,
+                    htmlUrl: `https://github.com/${prev.contributorUsername}/${prev.repositoryName}`,
+                    defaultBranch: 'main',
+                    isFork: true,
+                    hasWritePermission: true,
+                  },
+                  branchName: `cosinput/${prev.issueNumber}-workspace`,
+                  branchCreated: true,
+                  preparedAt: new Date().toISOString(),
+                },
+              }
+            : null
+        );
+        setActiveTab('workspace');
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'AUTHORIZATION_FAILURE',
+              statusCode: err.statusCode || 400,
+              message: err.message || 'Failed to prepare workspace.',
+            }
+      );
+    } finally {
+      setPreparingWorkspace(false);
+    }
+  };
+
+  const handleApproveForkCreation = async () => {
+    if (!session) return;
+    setCreatingFork(true);
+    setError(null);
+    try {
+      if (isLive) {
+        const res = await githubService.approveForkCreation(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'AUTHORIZATION_FAILURE',
+              statusCode: 400,
+              message: err.message || 'Failed to approve fork creation.',
+            }
+      );
+    } finally {
+      setCreatingFork(false);
+    }
+  };
+
+  const handleApproveBranchCreation = async () => {
+    if (!session) return;
+    setCreatingBranch(true);
+    setError(null);
+    try {
+      if (isLive) {
+        const res = await githubService.approveBranchCreation(session.id);
+        if (res.success && res.session) {
+          setSession(res.session);
+        }
+      }
+    } catch (err: any) {
+      setError(
+        err.classification
+          ? err
+          : {
+              classification: 'AUTHORIZATION_FAILURE',
+              statusCode: 400,
+              message: err.message || 'Failed to create remote branch on fork.',
+            }
+      );
+    } finally {
+      setCreatingBranch(false);
     }
   };
 
@@ -409,27 +525,152 @@ export const WorkspacePage: React.FC = () => {
         </div>
       )}
 
-      {/* 3. Human Approval Gate Banner (Requirement 10 & 16) */}
+      {/* 3. Human Approval Gate Banner & Execution Status UI (Requirement 6, 7 & 10) */}
       {session && session.analysisStatus === 'APPROVED' && (
-        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4">
-          <div className="p-4 rounded-xl bg-tertiary-container/15 border border-tertiary/30 flex items-center justify-between gap-4">
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4 space-y-3">
+          <div className="p-4 rounded-xl bg-tertiary-container/15 border border-tertiary/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-full bg-tertiary text-on-tertiary flex items-center justify-center shrink-0">
-                <span className="material-symbols-outlined text-[20px]">check</span>
+                <span className="material-symbols-outlined text-[20px]">verified</span>
               </div>
               <div className="flex flex-col">
-                <span className="font-headline-sm text-headline-sm font-bold text-tertiary">
-                  Plan Approved. Implementation has not started.
-                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-headline-sm text-headline-sm font-bold text-tertiary">
+                    Plan Approved. Execution Stage: Contributor Workspace Preparation
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded font-code-sm text-[11px] font-bold uppercase bg-surface-container-high text-on-surface border border-surface-container">
+                    Status: {session.preparationStatus || 'PLAN_APPROVED'}
+                  </span>
+                </div>
                 <span className="font-body-sm text-body-sm text-secondary">
-                  Human verification completed. In accordance with Foundation v0.3 invariants, zero write operations, branches, or autonomous coding runs were executed.
+                  Human verification completed. In accordance with Foundation v0.4.1 invariants, isolated workspace preparation discovers contributor forks without modifying code.
                 </span>
               </div>
             </div>
-            <span className="font-code-sm text-[11px] bg-tertiary-fixed text-on-tertiary-fixed px-3 py-1 rounded font-semibold uppercase">
-              Ready for v0.4 Runner
-            </span>
+
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              {(!session.preparationStatus || session.preparationStatus === 'PLAN_APPROVED') && (
+                <button
+                  type="button"
+                  disabled={preparingWorkspace}
+                  onClick={handlePrepareWorkspace}
+                  className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[18px]">terminal</span>
+                  <span>{preparingWorkspace ? 'Preparing Workspace...' : 'Prepare Isolated Workspace'}</span>
+                </button>
+              )}
+
+              {session.preparationStatus === 'WORKSPACE_READY' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('workspace')}
+                  className="px-4 py-2 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow hover:opacity-90 cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[18px]">open_in_new</span>
+                  <span>View Prepared Workspace</span>
+                </button>
+              )}
+            </div>
           </div>
+
+          {/* Gate 1: Fork Creation Approval Required */}
+          {session.preparationStatus === 'FORK_CREATION_APPROVAL_REQUIRED' && (
+            <div className="p-5 rounded-xl bg-primary-fixed/20 border border-primary/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-primary text-[24px] mt-0.5 shrink-0">fork_right</span>
+                <div className="space-y-1">
+                  <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                    Human Approval Required: Create Contributor Fork
+                  </span>
+                  <p className="font-body-sm text-body-sm text-secondary">
+                    No fork detected under contributor account <strong>@{session.contributorUsername}</strong>. Explicit user approval is required before creating a remote fork on GitHub.
+                  </p>
+                  <div className="flex items-center gap-3 pt-1 text-code-sm font-code-sm text-secondary flex-wrap">
+                    <span><strong>Target:</strong> {session.contributorUsername}/{session.repositoryName}</span>
+                    <span>•</span>
+                    <span><strong>Scope:</strong> public_repo (read & write to user forks)</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={creatingFork}
+                onClick={handleApproveForkCreation}
+                className="px-5 py-2.5 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                <span className="material-symbols-outlined text-[18px]">verified_user</span>
+                <span>{creatingFork ? 'Creating Remote Fork...' : 'Approve & Create Fork'}</span>
+              </button>
+            </div>
+          )}
+
+          {/* Gate 2: Authorization Required */}
+          {session.preparationStatus === 'AUTHORIZATION_REQUIRED' && (
+            <div className="p-5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-3">
+              <span className="material-symbols-outlined text-amber-600 text-[24px] mt-0.5 shrink-0">vpn_key</span>
+              <div className="space-y-1">
+                <span className="font-headline-sm text-headline-sm font-bold text-amber-900 block">
+                  Contributor Write Authorization Required
+                </span>
+                <p className="font-body-sm text-body-sm text-on-surface">
+                  Remote fork discovery and branch preparation requires contributor-level credentials. An upstream GitHub App installation alone cannot authorize contributor writes.
+                </p>
+                <p className="font-code-sm text-[12px] text-secondary">
+                  Permission scope needed: <code>public_repo</code> (scoped strictly to contributor-owned repositories). Zero credentials are leaked or stored unencrypted.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Gate 3: Reanalysis Required (Revision Drift) */}
+          {session.preparationStatus === 'REANALYSIS_REQUIRED' && (
+            <div className="p-5 rounded-xl bg-error-container/20 border border-error/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-error text-[24px] mt-0.5 shrink-0">published_with_changes</span>
+                <div className="space-y-1">
+                  <span className="font-headline-sm text-headline-sm font-bold text-error block">
+                    Reanalysis Required — Approved Plan Stale
+                  </span>
+                  <p className="font-body-sm text-body-sm text-on-surface">
+                    {session.errorMessage || 'Upstream default branch revision has drifted since plan approval. Material changes require plan re-verification.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => runAnalysis(session.id)}
+                className="px-4 py-2 rounded-lg bg-error text-on-error font-label-md text-label-md font-semibold cursor-pointer shrink-0"
+              >
+                Re-analyze Upstream Repository
+              </button>
+            </div>
+          )}
+
+          {/* Gate 4: Preparation Failed */}
+          {session.preparationStatus === 'PREPARATION_FAILED' && (
+            <div className="p-5 rounded-xl bg-error-container/20 border border-error/40 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <span className="material-symbols-outlined text-error text-[24px] mt-0.5 shrink-0">error</span>
+                <div className="space-y-1">
+                  <span className="font-headline-sm text-headline-sm font-bold text-error block">
+                    Workspace Preparation Failed
+                  </span>
+                  <p className="font-body-sm text-body-sm text-on-surface">
+                    {session.errorMessage || 'Failed to prepare isolated workspace. Check network/rate-limits.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={preparingWorkspace}
+                onClick={handlePrepareWorkspace}
+                className="px-4 py-2 rounded-lg bg-error text-on-error font-label-md text-label-md font-semibold cursor-pointer shrink-0"
+              >
+                Retry Workspace Preparation
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -612,6 +853,22 @@ export const WorkspacePage: React.FC = () => {
                 >
                   <span className="material-symbols-outlined text-[16px]">warning</span>
                   <span>Risks & Blockers ({session.blockers.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('workspace')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'workspace'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">terminal</span>
+                  <span>Isolated Workspace</span>
+                  {session.workspacePreparation?.status === 'WORKSPACE_READY' && (
+                    <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+                  )}
                 </button>
               </div>
 
@@ -1192,6 +1449,173 @@ export const WorkspacePage: React.FC = () => {
                     <div className="p-4 rounded-xl bg-tertiary-container/15 text-tertiary border border-tertiary/30 flex items-center gap-2">
                       <span className="material-symbols-outlined text-[20px]">check_circle</span>
                       <span className="font-headline-sm text-headline-sm font-semibold">Zero Blockers Detected</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Tab 8: Isolated Workspace Preparation */}
+              {activeTab === 'workspace' && (
+                <div className="bg-surface-container-lowest rounded-xl p-6 border border-surface-container shadow-sm space-y-6">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-surface-container-low pb-4 gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary text-[24px]">terminal</span>
+                        <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                          Isolated Contributor Workspace
+                        </h2>
+                      </div>
+                      <p className="font-body-sm text-body-sm text-secondary mt-1">
+                        Isolated GitHub environment prepared for approved plan execution. Zero code modifications or PRs created.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="font-code-sm text-[11px] uppercase font-bold px-3 py-1 rounded bg-surface-container text-on-surface border border-surface-container">
+                        Status: {session.preparationStatus || 'PLAN_APPROVED'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {session.workspacePreparation ? (
+                    <div className="space-y-6">
+                      {/* Workspace Environment Card */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                          <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                            Repository Boundaries
+                          </span>
+                          <div className="space-y-2 font-code-sm text-code-sm">
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Canonical Upstream:</span>
+                              <span className="font-semibold text-on-surface">{session.upstreamRepository}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Contributor Identity:</span>
+                              <span className="font-semibold text-primary">@{session.workspacePreparation.contributorIdentity}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Contributor Fork:</span>
+                              <span className="font-semibold text-on-surface font-mono">
+                                {session.workspacePreparation.contributorFork?.fullName || 'Pending creation'}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Fork Write Access:</span>
+                              <span className="font-semibold text-tertiary">
+                                {session.workspacePreparation.contributorFork?.hasWritePermission ? 'Verified Authorized' : 'Pending Authorization'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                          <span className="font-label-caps text-[11px] uppercase font-bold text-secondary block">
+                            Branch & Revision Integrity
+                          </span>
+                          <div className="space-y-2 font-code-sm text-code-sm">
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Base Branch:</span>
+                              <span className="font-semibold text-on-surface font-mono">{session.workspacePreparation.baseBranch}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Base Commit SHA:</span>
+                              <span className="font-semibold text-on-surface font-mono">{session.workspacePreparation.baseCommitSha.substring(0, 10)}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Isolated Branch:</span>
+                              <span className="font-semibold text-primary font-mono">{session.workspacePreparation.branchName}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-secondary">Remote Reference:</span>
+                              <span className="font-semibold text-on-surface">
+                                {session.workspacePreparation.branchCreated ? 'Created on Remote Fork' : 'Local Record Ready'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Approval Gate for Remote Branch Creation */}
+                      {session.workspacePreparation.contributorFork && !session.workspacePreparation.branchCreated && (
+                        <div className="p-5 rounded-xl bg-primary-fixed/20 border border-primary/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                          <div className="flex items-start gap-3">
+                            <span className="material-symbols-outlined text-primary text-[24px] mt-0.5 shrink-0">add_moderator</span>
+                            <div className="space-y-1">
+                              <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                                Human Approval Gate: Create Remote Branch on Fork
+                              </span>
+                              <p className="font-body-sm text-body-sm text-secondary">
+                                Explicit human approval is required before creating remote Git references. No code will be committed.
+                              </p>
+                              <div className="flex items-center gap-3 pt-1 text-code-sm font-code-sm text-secondary flex-wrap">
+                                <span><strong>Target Repository:</strong> {session.workspacePreparation.contributorFork.fullName}</span>
+                                <span>•</span>
+                                <span><strong>Proposed Branch:</strong> {session.workspacePreparation.branchName}</span>
+                                <span>•</span>
+                                <span><strong>Base SHA:</strong> {session.workspacePreparation.baseCommitSha.substring(0, 7)}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={creatingBranch}
+                            onClick={handleApproveBranchCreation}
+                            className="px-5 py-2.5 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 disabled:opacity-50 cursor-pointer shrink-0"
+                          >
+                            <span className="material-symbols-outlined text-[18px]">alt_route</span>
+                            <span>{creatingBranch ? 'Creating Branch...' : 'Approve & Create Branch'}</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Invariant Safeguards Card */}
+                      <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3">
+                        <div className="flex items-center gap-2 text-on-surface font-headline-sm text-headline-sm font-semibold">
+                          <span className="material-symbols-outlined text-tertiary text-[20px]">security</span>
+                          <span>COSInput Foundation v0.4.1 Invariants Enforced</span>
+                        </div>
+                        <ul className="space-y-1.5 font-body-sm text-body-sm text-secondary">
+                          <li className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                            <span>Execution Run ID: <code>{session.workspacePreparation.executionRunId}</code></span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                            <span>Approved Plan Version: <code>{session.workspacePreparation.approvedPlanVersion}</code></span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                            <span>Collision Safety: Issue-specific slug checked against contributor fork references.</span>
+                          </li>
+                          <li className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+                            <span>Zero Code Invariant: No code commits, file edits, or pull requests have been executed.</span>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-8 text-center space-y-4">
+                      <span className="material-symbols-outlined text-outline text-[48px]">terminal</span>
+                      <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                        Workspace Not Prepared Yet
+                      </h3>
+                      <p className="font-body-md text-body-md text-secondary max-w-md mx-auto">
+                        Once an implementation plan is verified and approved, click below to discover contributor forks and prepare an isolated workspace.
+                      </p>
+                      {session.analysisStatus === 'APPROVED' && (
+                        <button
+                          type="button"
+                          disabled={preparingWorkspace}
+                          onClick={handlePrepareWorkspace}
+                          className="px-5 py-2.5 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 mx-auto shadow hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">terminal</span>
+                          <span>{preparingWorkspace ? 'Preparing Workspace...' : 'Prepare Isolated Workspace'}</span>
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

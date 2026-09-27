@@ -65,6 +65,11 @@ export interface IGitHubService {
   requestPlanRevision(id: string, feedback: string): Promise<{ success: boolean; session: any }>;
   cancelContribution(id: string): Promise<{ success: boolean; session: any }>;
 
+  // v0.4.1 Contributor Fork & Workspace Preparation methods
+  prepareWorkspace(id: string): Promise<{ success: boolean; session: any }>;
+  approveForkCreation(id: string): Promise<{ success: boolean; session: any }>;
+  approveBranchCreation(id: string): Promise<{ success: boolean; session: any }>;
+
   // Reserved write methods (Strictly disabled in v0.2/v0.3 production UI)
   createBranch(owner: string, repo: string, branchName: string, baseSha: string): Promise<{ ref: string; sha: string }>;
   pushCommit(owner: string, repo: string, branch: string, message: string, changes: unknown[]): Promise<{ sha: string }>;
@@ -326,6 +331,33 @@ export class RealGitHubService implements IGitHubService {
   async cancelContribution(id: string): Promise<{ success: boolean; session: any }> {
     return this.fetchApi<{ success: boolean; session: any }>(
       `/api/github/contributions/${encodeURIComponent(id)}/cancel`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async prepareWorkspace(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/prepare-workspace`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async approveForkCreation(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/approve-fork`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async approveBranchCreation(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/approve-branch`,
       {
         method: 'POST',
       }

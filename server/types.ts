@@ -346,6 +346,54 @@ export interface ActivityTimelineItem {
   active?: boolean;
 }
 
+export type PreparationStatus =
+  | 'PLAN_APPROVED'
+  | 'FORK_DISCOVERY'
+  | 'AUTHORIZATION_REQUIRED'
+  | 'FORK_CREATION_APPROVAL_REQUIRED'
+  | 'WORKSPACE_PREPARING'
+  | 'WORKSPACE_READY'
+  | 'PREPARATION_FAILED'
+  | 'REANALYSIS_REQUIRED';
+
+export interface ContributorForkInfo {
+  owner: string;
+  name: string;
+  fullName: string;
+  htmlUrl: string;
+  defaultBranch: string;
+  isFork: boolean;
+  parentFullName?: string;
+  hasWritePermission: boolean;
+}
+
+export interface WorkspacePendingOperation {
+  type: 'create_fork' | 'create_branch';
+  description: string;
+  targetRepository: string;
+  targetBranch?: string;
+  requiredPermissionScope: string;
+}
+
+export interface WorkspacePreparationData {
+  executionRunId: string;
+  status: PreparationStatus;
+  contributorIdentity: string;
+  upstreamRepository: string;
+  selectedIssueNumber: number;
+  approvedAnalysisAttemptId: string;
+  approvedPlanVersion: string;
+  baseBranch: string;
+  baseCommitSha: string;
+  approvedCommitSha?: string;
+  contributorFork: ContributorForkInfo | null;
+  branchName: string;
+  branchCreated?: boolean;
+  preparedAt?: string;
+  errorMessage?: string;
+  pendingOperation?: WorkspacePendingOperation | null;
+}
+
 export interface ContributionSession {
   id: string;
   repositoryOwner: string;
@@ -357,6 +405,10 @@ export interface ContributionSession {
   contributorUsername: string;
   repositoryAccessStatus: RepositoryAccessStatus;
   analysisStatus: AnalysisStatus;
+  preparationStatus?: PreparationStatus;
+  workspacePreparation?: WorkspacePreparationData | null;
+  baseCommitSha?: string;
+  approvedCommitSha?: string;
   createdTimestamp: string;
   updatedTimestamp: string;
   currentAttemptId?: string;

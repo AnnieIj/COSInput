@@ -12,6 +12,7 @@ import type {
   SanitizedGitHubError,
   GitHubErrorClassification,
   GitHubInstallationSummary,
+  ContributorForkInfo,
 } from './types';
 
 export function classifyGitHubError(
@@ -665,6 +666,258 @@ export class GitHubServerClient {
         size: item.size,
       })),
       isEmptyRepository: false,
+    };
+  }
+
+  /**
+   * Retrieves branch details from a repository, including head commit SHA.
+   */
+  async getBranch(
+    owner: string,
+    repo: string,
+    branch: string,
+    customToken?: string
+  ): Promise<{ name: string; commitSha: string; protected: boolean }> {
+    const token = await this.getEffectiveToken(null, customToken);
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'repository_metadata');
+    }
+
+    const data = parsed.json || {};
+    return {
+      name: data.name || branch,
+      commitSha: data.commit?.sha || '',
+      protected: Boolean(data.protected),
+    };
+  }
+
+  /**
+   * Discovers whether a contributor already owns a verified fork of an upstream repository.
+   * Validates the upstream parent relationship before returning.
+   */
+  async getFork(
+    upstreamOwner: string,
+    upstreamRepo: string,
+    contributorLogin: string,
+    customToken?: string
+  ): Promise<ContributorForkInfo | null> {
+    const token = await this.getEffectiveToken(null, customToken);
+
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const canonicalUpstream = `${upstreamOwner}/${upstreamRepo}`.toLowerCase();
+
+    // 1. Direct probe of contributor's personal repository with same name
+    try {
+      const directRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(contributorLogin)}/${encodeURIComponent(upstreamRepo)}`,
+        { headers }
+      );
+
+      const parsed = await safeParseResponse<any>(directRes);
+      if (directRes.status === 403 || directRes.status === 429) {
+        const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+        const err = classifyGitHubError(directRes.status, String(errorText), directRes.headers, 'other');
+        if (err.classification === 'RATE_LIMIT') {
+          throw err;
+        }
+      }
+      if (directRes.ok && parsed.json) {
+        const data = parsed.json;
+        const parentFull = (data.parent?.full_name || '').toLowerCase();
+        const sourceFull = (data.source?.full_name || '').toLowerCase();
+
+        // Validate upstream relationship
+        if (data.fork && (parentFull === canonicalUpstream || sourceFull === canonicalUpstream)) {
+          return {
+            owner: data.owner?.login || contributorLogin,
+            name: data.name,
+            fullName: data.full_name,
+            htmlUrl: data.html_url,
+            defaultBranch: data.default_branch || 'main',
+            isFork: true,
+            parentFullName: data.parent?.full_name || `${upstreamOwner}/${upstreamRepo}`,
+            hasWritePermission: Boolean(data.permissions?.push || data.permissions?.admin),
+          };
+        }
+      }
+    } catch (err: any) {
+      if (err?.classification === 'RATE_LIMIT') {
+        throw err;
+      }
+      // Continue to secondary probe
+    }
+
+    // 2. Query upstream repository's forks list to discover contributor-owned forks
+    try {
+      const forksRes = await fetch(
+        `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}/forks?per_page=100`,
+        { headers }
+      );
+
+      const parsed = await safeParseResponse<any>(forksRes);
+      if (forksRes.status === 403 || forksRes.status === 429) {
+        const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+        const err = classifyGitHubError(forksRes.status, String(errorText), forksRes.headers, 'other');
+        if (err.classification === 'RATE_LIMIT') {
+          throw err;
+        }
+      }
+      if (forksRes.ok && Array.isArray(parsed.json)) {
+        const matchingFork = parsed.json.find(
+          (f) => (f.owner?.login || '').toLowerCase() === contributorLogin.toLowerCase()
+        );
+        if (matchingFork) {
+          return {
+            owner: matchingFork.owner?.login || contributorLogin,
+            name: matchingFork.name,
+            fullName: matchingFork.full_name,
+            htmlUrl: matchingFork.html_url,
+            defaultBranch: matchingFork.default_branch || 'main',
+            isFork: true,
+            parentFullName: `${upstreamOwner}/${upstreamRepo}`,
+            hasWritePermission: Boolean(matchingFork.permissions?.push || matchingFork.permissions?.admin),
+          };
+        }
+      }
+    } catch (err: any) {
+      if (err?.classification === 'RATE_LIMIT') {
+        throw err;
+      }
+      // Fall through to null
+    }
+
+    return null;
+  }
+
+  /**
+   * Creates a fork of an upstream repository under the contributor's account.
+   * Requires a valid contributor user token with write permissions.
+   * Never overwrites an existing fork.
+   */
+  async createFork(
+    upstreamOwner: string,
+    upstreamRepo: string,
+    userToken: string
+  ): Promise<ContributorForkInfo> {
+    if (!userToken) {
+      throw classifyGitHubError(
+        401,
+        'Contributor write authorization token is required to create a fork.',
+        undefined,
+        'installation'
+      );
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${userToken}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.1',
+    };
+
+    const response = await fetch(
+      `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}/forks`,
+      {
+        method: 'POST',
+        headers,
+      }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok && response.status !== 202) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'installation');
+    }
+
+    const data = parsed.json || {};
+    return {
+      owner: data.owner?.login || '',
+      name: data.name || upstreamRepo,
+      fullName: data.full_name || `${data.owner?.login || ''}/${upstreamRepo}`,
+      htmlUrl: data.html_url || `https://github.com/${data.owner?.login || ''}/${upstreamRepo}`,
+      defaultBranch: data.default_branch || 'main',
+      isFork: true,
+      parentFullName: `${upstreamOwner}/${upstreamRepo}`,
+      hasWritePermission: true,
+    };
+  }
+
+  /**
+   * Creates an isolated issue branch on a contributor fork.
+   * Never overwrites, resets, or force-pushes an existing branch.
+   */
+  async createBranch(
+    forkOwner: string,
+    forkRepo: string,
+    branchName: string,
+    commitSha: string,
+    userToken: string
+  ): Promise<{ ref: string; sha: string; created: boolean }> {
+    if (!userToken) {
+      throw classifyGitHubError(
+        401,
+        'Contributor write authorization token is required to create a branch on the fork.',
+        undefined,
+        'source_file'
+      );
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${userToken}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.1',
+    };
+
+    const response = await fetch(
+      `https://api.github.com/repos/${forkOwner}/${forkRepo}/git/refs`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ref: `refs/heads/${branchName}`,
+          sha: commitSha,
+        }),
+      }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'source_file');
+    }
+
+    const data = parsed.json || {};
+    return {
+      ref: data.ref || `refs/heads/${branchName}`,
+      sha: data.object?.sha || commitSha,
+      created: true,
     };
   }
 }

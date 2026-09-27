@@ -12,6 +12,7 @@ import { userAuthStore } from './userAuthStore';
 import { contributionSessionStore } from './contributionSessionStore';
 import { repositoryIntelligenceService } from './repositoryIntelligenceService';
 import { issueAnalysisService } from './issueAnalysisService';
+import { workspacePreparationService } from './workspacePreparationService';
 import type { SanitizedGitHubError } from './types';
 
 export const githubRouter = Router();
@@ -856,6 +857,8 @@ githubRouter.post('/contributions/:id/approve', (req, res) => {
 
   const updated = contributionSessionStore.updateSession(session.id, {
     analysisStatus: 'APPROVED',
+    preparationStatus: 'PLAN_APPROVED',
+    approvedCommitSha: req.body?.commitSha || session.baseCommitSha || session.approvedCommitSha,
     humanApproval: {
       status: 'approved',
       approvedAt: now,
@@ -940,4 +943,74 @@ githubRouter.post('/contributions/:id/cancel', (req, res) => {
     success: true,
     session: updated,
   });
+});
+
+/**
+ * POST /api/github/contributions/:id/prepare-workspace
+ * Discovers contributor fork and prepares isolated workspace.
+ * Strictly read-only relative to code modification.
+ */
+githubRouter.post('/contributions/:id/prepare-workspace', async (req, res) => {
+  try {
+    const updated = await workspacePreparationService.prepareWorkspace(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to prepare workspace.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/approve-fork
+ * Human Approval Gate: Creates remote fork under contributor account.
+ */
+githubRouter.post('/contributions/:id/approve-fork', async (req, res) => {
+  try {
+    const updated = await workspacePreparationService.approveForkCreation(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to approve fork creation.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/approve-branch
+ * Human Approval Gate: Creates remote branch on contributor fork.
+ */
+githubRouter.post('/contributions/:id/approve-branch', async (req, res) => {
+  try {
+    const updated = await workspacePreparationService.approveBranchCreation(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to approve branch creation.',
+      },
+    });
+  }
 });
