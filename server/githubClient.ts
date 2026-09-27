@@ -14,7 +14,12 @@ import type {
   GitHubInstallationSummary,
 } from './types';
 
-export function classifyGitHubError(statusCode: number, rawMessage = '', headers?: Headers): SanitizedGitHubError {
+export function classifyGitHubError(
+  statusCode: number,
+  rawMessage = '',
+  headers?: Headers,
+  endpointCategory?: SanitizedGitHubError['endpointCategory']
+): SanitizedGitHubError {
   let classification: GitHubErrorClassification = 'GITHUB_SERVICE_FAILURE';
 
   if (statusCode === 401) {
@@ -37,16 +42,63 @@ export function classifyGitHubError(statusCode: number, rawMessage = '', headers
   // Parse retry-after if provided
   const retryAfterHeader = headers?.get('retry-after');
   const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+  const responseContentType = headers?.get('content-type') || undefined;
 
   return {
     classification,
     statusCode,
     message: rawMessage || `GitHub API request failed with status ${statusCode}`,
+    endpointCategory,
+    responseContentType,
     retryAfterSeconds: isNaN(retryAfterSeconds as number) ? undefined : retryAfterSeconds,
   };
 }
 
 export class GitHubServerClient {
+  /**
+   * Resolves the effective token for GitHub API operations.
+   * Priority:
+   * 1. customToken (e.g. user OAuth token)
+   * 2. installationId (specific installation token)
+   * 3. Configured GitHub App active installation token (for public repo read access with 5,000 req/hr rate limits)
+   * 4. undefined (unauthenticated public read fallback)
+   */
+  async getEffectiveToken(
+    installationId?: number | null,
+    customToken?: string
+  ): Promise<string | undefined> {
+    if (customToken) {
+      return customToken;
+    }
+    if (installationId) {
+      try {
+        const token = await getInstallationAccessToken(installationId);
+        if (token) return token;
+      } catch {
+        // Fall back to any active installation
+      }
+    }
+
+    // Public repository inspection:
+    // If the GitHub App is configured, use an active installation token to authenticate
+    // read requests across public GitHub repositories without requiring upstream installation.
+    try {
+      const config = getGitHubAppConfig();
+      if (config.isConfigured && !config.keyError) {
+        const installations = await this.listInstallations();
+        const active = installations.find((i) => !i.suspendedAt);
+        if (active) {
+          const token = await getInstallationAccessToken(active.id);
+          if (token) return token;
+        }
+      }
+    } catch {
+      // Fall back to unauthenticated
+    }
+
+    return undefined;
+  }
+
   /**
    * Evaluates current system connection status with GitHub App credentials.
    */
@@ -305,14 +357,7 @@ export class GitHubServerClient {
    * Retrieves single issue details.
    */
   async getIssue(installationId: number | null | undefined, owner: string, repo: string, issueNumber: number, customToken?: string) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Continue even if installation token fails; will try unauthenticated if public
-      }
-    }
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -331,7 +376,7 @@ export class GitHubServerClient {
     const parsed = await safeParseResponse<any>(response);
     if (!response.ok) {
       const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'issue_payload');
     }
 
     const item = parsed.json || {};
@@ -370,14 +415,7 @@ export class GitHubServerClient {
    * Retrieves comments on an issue.
    */
   async listIssueComments(installationId: number | null | undefined, owner: string, repo: string, issueNumber: number, customToken?: string) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Fallback
-      }
-    }
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -396,7 +434,7 @@ export class GitHubServerClient {
     const parsed = await safeParseResponse<any[]>(response);
     if (!response.ok) {
       const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'issue_payload');
     }
 
     const data = Array.isArray(parsed.json) ? parsed.json : [];
@@ -423,14 +461,7 @@ export class GitHubServerClient {
     ref?: string,
     customToken?: string
   ) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Fall back to unauthenticated public request
-      }
-    }
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const url = new URL(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`);
     if (ref) url.searchParams.set('ref', ref);
@@ -449,7 +480,7 @@ export class GitHubServerClient {
 
     if (!response.ok) {
       const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'source_file');
     }
 
     const data = parsed.json;
@@ -487,14 +518,7 @@ export class GitHubServerClient {
     ref?: string,
     customToken?: string
   ) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Fall back
-      }
-    }
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const url = new URL(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`);
     if (ref) url.searchParams.set('ref', ref);
@@ -513,7 +537,7 @@ export class GitHubServerClient {
 
     if (!response.ok) {
       const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'source_file');
     }
 
     const data = parsed.json;
@@ -543,14 +567,7 @@ export class GitHubServerClient {
     repo: string,
     customToken?: string
   ) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Fall back
-      }
-    }
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -566,7 +583,7 @@ export class GitHubServerClient {
 
     if (!response.ok) {
       const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'repository_metadata');
     }
 
     const data = parsed.json || {};
@@ -597,15 +614,13 @@ export class GitHubServerClient {
     repo: string,
     branch: string = 'main',
     customToken?: string
-  ) {
-    let token = customToken;
-    if (!token && installationId) {
-      try {
-        token = await getInstallationAccessToken(installationId);
-      } catch {
-        // Fall back
-      }
-    }
+  ): Promise<{
+    sha: string;
+    truncated: boolean;
+    tree: { path: string; mode: string; type: 'blob' | 'tree'; sha: string; size?: number }[];
+    isEmptyRepository?: boolean;
+  }> {
+    const token = await this.getEffectiveToken(installationId, customToken);
 
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -624,7 +639,17 @@ export class GitHubServerClient {
     const parsed = await safeParseResponse<any>(response);
     if (!response.ok) {
       const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
-      throw classifyGitHubError(response.status, String(errorText), response.headers);
+      // Differentiate genuine empty repositories from failed retrieval:
+      // When a repository is legitimately empty (0 commits/branches), GitHub returns 409 Conflict with "Git Repository is empty."
+      if (response.status === 409 || String(errorText).toLowerCase().includes('git repository is empty')) {
+        return {
+          sha: '',
+          truncated: false,
+          tree: [],
+          isEmptyRepository: true,
+        };
+      }
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'git_tree');
     }
 
     const data = parsed.json || {};
@@ -639,6 +664,7 @@ export class GitHubServerClient {
         sha: item.sha,
         size: item.size,
       })),
+      isEmptyRepository: false,
     };
   }
 }

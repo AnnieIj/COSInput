@@ -51,6 +51,8 @@ export interface SanitizedGitHubError {
   classification: GitHubErrorClassification;
   statusCode: number;
   message: string;
+  endpointCategory?: 'repository_metadata' | 'git_tree' | 'source_file' | 'issue_payload' | 'installation' | 'other';
+  responseContentType?: string;
   documentationUrl?: string;
   retryAfterSeconds?: number;
 }

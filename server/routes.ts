@@ -653,21 +653,13 @@ githubRouter.post('/contributions/:id/analyze', async (req, res) => {
     );
 
     // 1. Fetch live issue payload from GitHub
-    const issuePayload = await githubServerClient
-      .getIssue(
-        null,
-        session.repositoryOwner,
-        session.repositoryName,
-        session.issueNumber,
-        userAuthStore.getUserToken() || undefined
-      )
-      .catch(() => {
-        return {
-          title: session.issueTitle,
-          body: '',
-          labels: [],
-        };
-      });
+    const issuePayload = await githubServerClient.getIssue(
+      null,
+      session.repositoryOwner,
+      session.repositoryName,
+      session.issueNumber,
+      userAuthStore.getUserToken() || undefined
+    );
 
     // 2. Inspect repository with snapshot preservation
     contributionSessionStore.addTimelineEvent(

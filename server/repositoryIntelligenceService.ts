@@ -42,8 +42,7 @@ export class RepositoryIntelligenceService {
         repo,
         bearerToken
       );
-    } catch {
-      // If fetching details fails, use fallback or previous verified snapshot
+    } catch (err: any) {
       if (previousSnapshot) {
         repoDetails = {
           defaultBranch: previousSnapshot.repositoryIntelligence.defaultBranch,
@@ -54,14 +53,8 @@ export class RepositoryIntelligenceService {
           isPrivate: previousSnapshot.repositoryIntelligence.isPrivate,
         };
       } else {
-        repoDetails = {
-          defaultBranch: 'main',
-          description: '',
-          stars: 0,
-          forks: 0,
-          openIssuesCount: 0,
-          isPrivate: false,
-        };
+        // Failed metadata retrieval without snapshot must throw (Requirement 7)
+        throw err;
       }
     }
 
@@ -77,34 +70,53 @@ export class RepositoryIntelligenceService {
         defaultBranch,
         bearerToken
       );
-      treeFiles = treeData.tree || [];
-    } catch {
-      // If recursive tree fails (e.g. repo too large or 409 empty), try directory listing of root
-      try {
-        const rootItems = await githubServerClient.getDirectoryContents(
-          installationId,
-          owner,
-          repo,
-          '',
-          defaultBranch,
-          bearerToken
-        );
+      if (treeData.isEmptyRepository) {
+        // Legitimate empty repository confirmed by GitHub (HTTP 409 Conflict)
+        treeFiles = [];
+      } else {
+        treeFiles = treeData.tree || [];
+      }
+    } catch (err: any) {
+      // If error indicates rate limit, auth failure, 404, do not attempt directory listing
+      const isRateOrAuthError =
+        err?.classification === 'RATE_LIMIT' ||
+        err?.classification === 'AUTHENTICATION_FAILURE' ||
+        err?.classification === 'AUTHORIZATION_FAILURE' ||
+        err?.classification === 'NOT_FOUND' ||
+        (err?.message && err.message.toLowerCase().includes('rate limit'));
+
+      let rootItems: any[] | null = null;
+      if (!isRateOrAuthError && (!err?.classification || err.classification === 'GITHUB_SERVICE_FAILURE')) {
+        try {
+          rootItems = await githubServerClient.getDirectoryContents(
+            installationId,
+            owner,
+            repo,
+            '',
+            defaultBranch,
+            bearerToken
+          );
+        } catch {
+          rootItems = null;
+        }
+      }
+
+      if (rootItems && Array.isArray(rootItems)) {
         treeFiles = rootItems.map((item) => ({
           path: item.path,
           type: item.type === 'dir' ? 'tree' : 'blob',
           size: item.size,
           sha: item.sha,
         }));
-      } catch {
-        // If tree retrieval also fails, use previous snapshot tree if available
-        if (previousSnapshot?.repositoryIntelligence?.allTreeFiles) {
-          treeFiles = previousSnapshot.repositoryIntelligence.allTreeFiles.map((p) => ({
-            path: p,
-            type: 'blob',
-          }));
-        } else {
-          treeFiles = [];
-        }
+      } else if (previousSnapshot?.repositoryIntelligence?.allTreeFiles) {
+        // Fall back to historical verified tree snapshot
+        treeFiles = previousSnapshot.repositoryIntelligence.allTreeFiles.map((p) => ({
+          path: p,
+          type: 'blob',
+        }));
+      } else {
+        // Failed retrieval without previous snapshot must throw, never become an empty repository (Requirement 6 & 7)
+        throw err;
       }
     }
 
