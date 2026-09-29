@@ -9,6 +9,7 @@
 import { githubServerClient, classifyGitHubError } from './githubClient';
 import { userAuthStore } from './userAuthStore';
 import { contributionSessionStore } from './contributionSessionStore';
+import { workspaceExecutionEngine } from './workspaceExecutionEngine';
 import type {
   ContributionSession,
   ContributorForkInfo,
@@ -379,6 +380,40 @@ export class WorkspacePreparationService {
     }
 
     // 8. Idempotent Workspace Preparation
+    // If authentic checkout is required or a clone source is provided, verify authentic Git checkout first
+    if (session.requireAuthenticCheckout || session.customCloneSource) {
+      try {
+        await workspaceExecutionEngine.checkoutAuthenticWorkspace({
+          sessionId: session.id,
+          runId: executionRunId,
+          upstreamRepository: session.upstreamRepository,
+          contributorFork: existingFork.fullName,
+          branchName: safeBranchName,
+          baseCommitSha: effectiveApprovedSha,
+          defaultBranch,
+          customCloneSource: session.customCloneSource,
+        });
+      } catch (checkoutErr: any) {
+        // A failed checkout must NEVER transition to WORKSPACE_READY
+        const errorMsg = `Authentic Git workspace checkout failed: ${checkoutErr.message}`;
+        contributionSessionStore.updateSession(session.id, {
+          preparationStatus: 'PREPARATION_FAILED',
+          errorMessage: errorMsg,
+        });
+        contributionSessionStore.addTimelineEvent(
+          session.id,
+          'Preparation Failed',
+          errorMsg
+        );
+        const error: SanitizedGitHubError = {
+          classification: 'GITHUB_SERVICE_FAILURE',
+          statusCode: 400,
+          message: errorMsg,
+        };
+        throw error;
+      }
+    }
+
     const prepData: WorkspacePreparationData = {
       executionRunId,
       status: 'WORKSPACE_READY',
@@ -411,6 +446,54 @@ export class WorkspacePreparationService {
     );
 
     return updated;
+  }
+
+  /**
+   * Verifies and checks out an authentic Git repository workspace on disk.
+   * If checkout fails, transitions session to PREPARATION_FAILED (never WORKSPACE_READY).
+   */
+  async verifyAndCheckoutWorkspace(
+    sessionId: string,
+    customCloneSource?: string
+  ): Promise<ContributionSession> {
+    const session = contributionSessionStore.getSession(sessionId);
+    if (!session) {
+      throw classifyGitHubError(404, `Contribution session '${sessionId}' not found.`);
+    }
+
+    const prep = session.workspacePreparation;
+    if (!prep) {
+      throw classifyGitHubError(400, 'Workspace preparation record not found.');
+    }
+
+    try {
+      await workspaceExecutionEngine.checkoutAuthenticWorkspace({
+        sessionId: session.id,
+        runId: prep.executionRunId,
+        upstreamRepository: session.upstreamRepository,
+        contributorFork: prep.contributorFork?.fullName || `${session.contributorUsername}/${session.repositoryName}`,
+        branchName: prep.branchName,
+        baseCommitSha: prep.baseCommitSha,
+        defaultBranch: prep.baseBranch,
+        customCloneSource: customCloneSource || session.customCloneSource,
+      });
+
+      return contributionSessionStore.updateSession(session.id, {
+        preparationStatus: 'WORKSPACE_READY',
+      });
+    } catch (err: any) {
+      const errorMsg = `Authentic Git workspace checkout failed: ${err.message}`;
+      contributionSessionStore.updateSession(session.id, {
+        preparationStatus: 'PREPARATION_FAILED',
+        errorMessage: errorMsg,
+      });
+      contributionSessionStore.addTimelineEvent(
+        session.id,
+        'Checkout Failed',
+        errorMsg
+      );
+      throw classifyGitHubError(400, errorMsg);
+    }
   }
 
   /**

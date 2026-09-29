@@ -14,6 +14,8 @@ import { repositoryIntelligenceService } from './repositoryIntelligenceService';
 import { issueAnalysisService } from './issueAnalysisService';
 import { workspacePreparationService } from './workspacePreparationService';
 import { implementationRunnerService } from './implementationRunnerService';
+import { controlledSubmissionService } from './submissionService';
+import { workspaceExecutionEngine } from './workspaceExecutionEngine';
 import type { SanitizedGitHubError } from './types';
 
 export const githubRouter = Router();
@@ -1103,6 +1105,175 @@ githubRouter.post('/contributions/:id/runner/reset', async (req, res) => {
         classification: 'GITHUB_SERVICE_FAILURE',
         statusCode: status,
         message: err.message || 'Failed to reset implementation execution.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/contributions/:id/submission/review
+ * Returns diff review, verification results, proposed commit, and proposed PR preview.
+ */
+githubRouter.get('/contributions/:id/submission/review', async (req, res) => {
+  try {
+    const reviewData = await controlledSubmissionService.getSubmissionReview(req.params.id);
+    res.json({
+      success: true,
+      review: reviewData,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to generate submission review.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/submission/approve-commit
+ * Human Approval Gate: Stages reviewed files and creates commit on isolated branch.
+ */
+githubRouter.post('/contributions/:id/submission/approve-commit', async (req, res) => {
+  try {
+    const { approvedFiles, customCommitMessage, proceedDespiteFailureAck } = req.body || {};
+    const updated = await controlledSubmissionService.approveCommit(req.params.id, {
+      approvedFiles,
+      customCommitMessage,
+      proceedDespiteFailureAck,
+    });
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to approve and create commit.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/submission/approve-push
+ * Human Approval Gate: Safely pushes isolated branch to contributor fork.
+ * Strictly verifies target is contributor fork, never canonical upstream.
+ */
+githubRouter.post('/contributions/:id/submission/approve-push', async (req, res) => {
+  try {
+    const updated = await controlledSubmissionService.approvePush(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to push branch to contributor fork.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/submission/approve-pr
+ * Human Approval Gate: Opens PR targeting canonical upstream repository.
+ * Detects existing PRs to prevent duplicates.
+ */
+githubRouter.post('/contributions/:id/submission/approve-pr', async (req, res) => {
+  try {
+    const { title, body } = req.body || {};
+    const updated = await controlledSubmissionService.approvePullRequest(req.params.id, {
+      title,
+      body,
+    });
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to open pull request on upstream repository.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/contributions/:id/submission/reset
+ * Resets submission state for safe retry.
+ */
+githubRouter.post('/contributions/:id/submission/reset', async (req, res) => {
+  try {
+    const updated = await controlledSubmissionService.resetSubmission(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to reset submission.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/contributions/:id/submission/workspace-status
+ * Inspects real vs simulated workspace execution boundary.
+ */
+githubRouter.get('/contributions/:id/submission/workspace-status', async (req, res) => {
+  try {
+    const session = contributionSessionStore.getSession(req.params.id);
+    if (!session) {
+      return res.status(404).json({
+        error: {
+          classification: 'NOT_FOUND',
+          statusCode: 404,
+          message: `Contribution session '${req.params.id}' not found.`,
+        },
+      });
+    }
+
+    const runId = session.executionRun?.id || session.workspacePreparation?.executionRunId || 'current';
+    const branchName = session.workspacePreparation?.branchName || 'workspace';
+    const baseSha = session.workspacePreparation?.baseCommitSha || 'main';
+
+    const status = await workspaceExecutionEngine.getWorkspaceStatus(
+      session.id,
+      runId,
+      branchName,
+      baseSha
+    );
+
+    res.json({
+      success: true,
+      status,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      error: {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: 500,
+        message: err.message || 'Failed to inspect workspace status.',
       },
     });
   }

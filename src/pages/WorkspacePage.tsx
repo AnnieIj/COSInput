@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMode } from '../context/ModeContext';
 import { githubService } from '../services/github.service';
+import { SubmissionReviewPanel } from '../components/SubmissionReviewPanel';
 import type {
   ContributionSession,
   AnalysisStatus,
@@ -29,7 +30,7 @@ export const WorkspacePage: React.FC = () => {
 
   // Tab navigation inside workspace
   const [activeTab, setActiveTab] = useState<
-    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers' | 'workspace' | 'runner'
+    'plan' | 'issue' | 'criteria' | 'files' | 'instructions' | 'deps' | 'blockers' | 'workspace' | 'runner' | 'submission'
   >('plan');
 
   // Human Approval Feedback modal state
@@ -935,14 +936,23 @@ export const WorkspacePage: React.FC = () => {
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab('runner')}
-              className="px-5 py-2 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 cursor-pointer shrink-0"
-            >
-              <span className="material-symbols-outlined text-[18px]">fact_check</span>
-              <span>Review Implementation Report</span>
-            </button>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setActiveTab('runner')}
+                className="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold border border-surface-container transition-colors cursor-pointer"
+              >
+                <span>Review Implementation Report</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('submission')}
+                className="px-5 py-2 rounded-lg bg-tertiary-container text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow hover:opacity-90 cursor-pointer shrink-0"
+              >
+                <span className="material-symbols-outlined text-[18px]">publish</span>
+                <span>Proceed to Review & PR Submission</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1091,6 +1101,24 @@ export const WorkspacePage: React.FC = () => {
                   {session.executionRun && ['EXECUTING', 'VERIFYING', 'REPAIRING'].includes(session.executionRun.status) && (
                     <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('submission')}
+                  className={`px-3.5 py-2 rounded-lg font-label-md text-label-md font-semibold transition-colors shrink-0 flex items-center gap-1.5 ${
+                    activeTab === 'submission'
+                      ? 'bg-primary-container text-on-primary shadow-sm'
+                      : 'text-secondary hover:text-on-surface hover:bg-surface-container'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">publish</span>
+                  <span>Review & PR Submission</span>
+                  {session.currentSubmission?.status === 'PR_OPENED' ? (
+                    <span className="w-2 h-2 rounded-full bg-tertiary"></span>
+                  ) : session.executionRun?.status === 'SUCCEEDED' ? (
+                    <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                  ) : null}
                 </button>
               </div>
 
@@ -2255,6 +2283,27 @@ export const WorkspacePage: React.FC = () => {
                       )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Tab 10: Controlled Submission (Commit, Push, Pull Request) */}
+              {activeTab === 'submission' && (
+                <div className="space-y-5">
+                  <SubmissionReviewPanel
+                    session={session}
+                    onSessionUpdated={setSession}
+                    onError={(err: any) =>
+                      setError(
+                        err?.classification
+                          ? err
+                          : {
+                              classification: 'GITHUB_SERVICE_FAILURE',
+                              statusCode: err?.statusCode || 500,
+                              message: err?.message || 'Submission error.',
+                            }
+                      )
+                    }
+                  />
                 </div>
               )}
             </div>

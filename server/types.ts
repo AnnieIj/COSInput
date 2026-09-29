@@ -430,6 +430,10 @@ export interface ContributionSession {
   activityTimeline: ActivityTimelineItem[];
   errorMessage?: string;
   executionRun?: ImplementationRunState | null;
+  currentSubmission?: SubmissionRecord | null;
+  submissionHistory?: SubmissionRecord[];
+  customCloneSource?: string;
+  requireAuthenticCheckout?: boolean;
 }
 
 export type ExecutionStatus =
@@ -544,10 +548,102 @@ export interface ImplementationFinalReport {
   completedAt: string;
 }
 
+export type WorkspaceExecutionMode = 'REAL_GIT_WORKSPACE' | 'SIMULATED_TEST_ENVIRONMENT';
+
+export type SubmissionStatus =
+  | 'REVIEW_READY'
+  | 'COMMIT_APPROVAL_REQUIRED'
+  | 'COMMITTING'
+  | 'COMMITTED'
+  | 'PUSH_APPROVAL_REQUIRED'
+  | 'PUSHING'
+  | 'PUSHED'
+  | 'PR_APPROVAL_REQUIRED'
+  | 'PR_CREATING'
+  | 'PR_OPENED'
+  | 'SUBMISSION_FAILED'
+  | 'CONFLICT_REQUIRES_REVIEW';
+
+export interface SubmissionReviewData {
+  canonicalUpstream: string;
+  contributorFork: string;
+  issueNumber: number;
+  issueTitle: string;
+  sourceBranch: string;
+  targetBranch: string;
+  approvedPlanVersion: string;
+  actualChangedFiles: string[];
+  gitDiff: string;
+  verificationResults: VerificationResultItem[];
+  acceptanceCriteriaEvidence: AcceptanceCriterionEvidence[];
+  proposedCommitMessage: string;
+  proposedPrTitle: string;
+  proposedPrDescription: string;
+  isExecutionReal: boolean;
+  executionEnvironment: WorkspaceExecutionMode;
+  hasVerificationFailure: boolean;
+  existingPrFound: boolean;
+  existingPr?: {
+    number: number;
+    htmlUrl: string;
+    title: string;
+    state: string;
+  } | null;
+}
+
+export interface CommitRecord {
+  sha: string;
+  message: string;
+  stagedFiles: string[];
+  executionRunId: string;
+  approvedAt: string;
+  author: string;
+}
+
+export interface SubmissionRecord {
+  id: string;
+  sessionId: string;
+  executionRunId: string;
+  status: SubmissionStatus;
+  executionEnvironment: WorkspaceExecutionMode;
+  upstreamRepository: string;
+  contributorFork: string;
+  sourceBranch: string;
+  targetBranch: string;
+  approvedPlanVersion: string;
+  stagedFiles: string[];
+  gitDiff: string;
+  commitSha?: string;
+  commitMessage?: string;
+  commitApprovedAt?: string;
+  pushApprovedAt?: string;
+  pushedAt?: string;
+  prApprovedAt?: string;
+  prOpenedAt?: string;
+  prNumber?: number;
+  prUrl?: string;
+  prTitle?: string;
+  prDescription?: string;
+  existingPrFound?: boolean;
+  existingPr?: {
+    number: number;
+    htmlUrl: string;
+    title: string;
+    state: string;
+  } | null;
+  verificationResults: VerificationResultItem[];
+  proceedDespiteFailureAck?: boolean;
+  divergenceDetails?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ImplementationRunState {
   id: string;
   sessionId: string;
   status: ExecutionStatus;
+  executionEnvironment?: WorkspaceExecutionMode;
   preview: ImplementationPreview;
   startedAt?: string;
   completedAt?: string;

@@ -18,6 +18,7 @@
 import { githubServerClient, classifyGitHubError } from './githubClient';
 import { userAuthStore } from './userAuthStore';
 import { contributionSessionStore } from './contributionSessionStore';
+import { workspaceExecutionEngine } from './workspaceExecutionEngine';
 import type {
   ContributionSession,
   ImplementationPreview,
@@ -31,6 +32,7 @@ import type {
   PlanDiscrepancy,
   ImplementationFinalReport,
   SanitizedGitHubError,
+  WorkspaceExecutionMode,
 } from './types';
 
 export interface CommandExecutionOption {
@@ -492,15 +494,61 @@ export class ImplementationRunnerService {
       };
     });
 
+    // Check / initialize real git workspace if possible
+    let execMode: WorkspaceExecutionMode = workspaceExecutionEngine.getExecutionMode();
+    let realDiff = '';
+    let wsPath = workspaceExecutionEngine.getWorkspacePath(session.id, runId);
+
+    const forkRepo =
+      session.workspacePreparation?.contributorFork?.fullName ||
+      `${session.contributorUsername}/${session.repositoryName}`;
+    const defaultBranch = session.repositoryIntelligence?.defaultBranch || 'main';
+
+    try {
+      if (session.customCloneSource) {
+        // Authentic checkout from real/disposable repository source
+        const report = await workspaceExecutionEngine.checkoutAuthenticWorkspace({
+          sessionId: session.id,
+          runId,
+          upstreamRepository: session.upstreamRepository,
+          contributorFork: forkRepo,
+          branchName: preview.selectedBranch,
+          baseCommitSha: preview.baseCommitSha,
+          defaultBranch,
+          customCloneSource: session.customCloneSource,
+        });
+        wsPath = report.workspacePath;
+        execMode = 'REAL_GIT_WORKSPACE';
+      } else {
+        wsPath = await workspaceExecutionEngine.initializeWorkspace(
+          session.id,
+          runId,
+          preview.selectedBranch,
+          preview.baseCommitSha
+        );
+      }
+
+      await workspaceExecutionEngine.applyFileModifications(
+        wsPath,
+        proposedChanges.map((c) => ({
+          targetFile: c.targetFile,
+          description: c.description,
+        }))
+      );
+      realDiff = await workspaceExecutionEngine.getWorkingTreeDiff(wsPath);
+    } catch {
+      execMode = 'SIMULATED_TEST_ENVIRONMENT';
+    }
+
     // Generate sanitized git diff representation
-    const diffHeader = `diff --git a/${modifiedFiles[0]?.path || 'src/solution.ts'} b/${modifiedFiles[0]?.path || 'src/solution.ts'}\n--- a/${modifiedFiles[0]?.path || 'src/solution.ts'}\n+++ b/${modifiedFiles[0]?.path || 'src/solution.ts'}\n@@ -1,10 +1,15 @@\n+ // Grounded implementation: ${session.implementationPlan?.issueSummary || 'Controlled change'}\n+ // Verified against acceptance criteria\n`;
+    const diffHeader = realDiff || `diff --git a/${modifiedFiles[0]?.path || 'src/solution.ts'} b/${modifiedFiles[0]?.path || 'src/solution.ts'}\n--- a/${modifiedFiles[0]?.path || 'src/solution.ts'}\n+++ b/${modifiedFiles[0]?.path || 'src/solution.ts'}\n@@ -1,10 +1,15 @@\n+ // Grounded implementation: ${session.implementationPlan?.issueSummary || 'Controlled change'}\n+ // Verified against acceptance criteria\n`;
 
     const executingLogs: ExecutionLogEntry[] = [
       ...initialRunState.logs,
       {
         timestamp: new Date().toISOString(),
         level: 'info',
-        message: `Inspected ${modifiedFiles.length} target files. Grounded modifications applied to working tree.`,
+        message: `Inspected ${modifiedFiles.length} target files. Grounded modifications applied to working tree (${execMode}).`,
         step: 'Grounded Modification',
       },
     ];
@@ -539,6 +587,13 @@ export class ImplementationRunnerService {
           exitCode = 1;
           output = err.message || 'Command failed with unexpected error.';
         }
+      } else if (session.customCloneSource && execMode === 'REAL_GIT_WORKSPACE') {
+        const cmdRes = await workspaceExecutionEngine.runCommandInWorkspace(
+          wsPath,
+          cmdItem.command
+        );
+        exitCode = cmdRes.exitCode;
+        output = cmdRes.stdout || cmdRes.stderr || `Command exited with code ${cmdRes.exitCode}`;
       }
 
       const passed = exitCode === 0;
@@ -695,6 +750,7 @@ export class ImplementationRunnerService {
       id: runId,
       sessionId: session.id,
       status: finalStatus,
+      executionEnvironment: execMode,
       preview,
       startedAt: now,
       completedAt: new Date().toISOString(),

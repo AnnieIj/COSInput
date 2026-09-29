@@ -920,6 +920,278 @@ export class GitHubServerClient {
       created: true,
     };
   }
+
+  /**
+   * Compares two commits / references on a repository.
+   * Useful to detect divergence, ahead/behind status, and changed files.
+   */
+  async compareCommits(
+    owner: string,
+    repo: string,
+    base: string,
+    head: string,
+    userToken?: string
+  ): Promise<{
+    status: 'ahead' | 'behind' | 'diverged' | 'identical';
+    aheadBy: number;
+    behindBy: number;
+    totalCommits: number;
+    files: Array<{ filename: string; status: string; additions: number; deletions: number }>;
+    mergeBaseCommitSha?: string;
+  }> {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const data = parsed.json || {};
+    return {
+      status: data.status || 'identical',
+      aheadBy: data.ahead_by || 0,
+      behindBy: data.behind_by || 0,
+      totalCommits: data.total_commits || 0,
+      files: (data.files || []).map((f: any) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+      })),
+      mergeBaseCommitSha: data.merge_base_commit?.sha,
+    };
+  }
+
+  /**
+   * Lists pull requests on a repository with optional filtering by head or base.
+   */
+  async listPullRequests(
+    owner: string,
+    repo: string,
+    options?: { head?: string; base?: string; state?: 'open' | 'closed' | 'all' },
+    userToken?: string
+  ): Promise<
+    Array<{
+      id: number;
+      number: number;
+      title: string;
+      body: string;
+      state: string;
+      htmlUrl: string;
+      head: { ref: string; sha: string; label: string };
+      base: { ref: string; sha: string };
+      createdAt: string;
+      updatedAt: string;
+      draft: boolean;
+    }>
+  > {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.3',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const params = new URLSearchParams();
+    if (options?.state) params.set('state', options.state);
+    if (options?.head) params.set('head', options.head);
+    if (options?.base) params.set('base', options.base);
+    params.set('per_page', '50');
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls?${params.toString()}`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any[]>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
+    return data.map((pr: any) => ({
+      id: pr.id,
+      number: pr.number,
+      title: pr.title,
+      body: pr.body || '',
+      state: pr.state,
+      htmlUrl: pr.html_url,
+      head: {
+        ref: pr.head?.ref || '',
+        sha: pr.head?.sha || '',
+        label: pr.head?.label || '',
+      },
+      base: {
+        ref: pr.base?.ref || '',
+        sha: pr.base?.sha || '',
+      },
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      draft: Boolean(pr.draft),
+    }));
+  }
+
+  /**
+   * Creates a pull request targeting the canonical upstream repository.
+   * Requires contributor write authorization.
+   * Strictly verifies that target repository matches canonical upstream.
+   */
+  async createPullRequest(
+    upstreamOwner: string,
+    upstreamRepo: string,
+    data: {
+      title: string;
+      body: string;
+      head: string;
+      base: string;
+      draft?: boolean;
+    },
+    userToken: string
+  ): Promise<{
+    id: number;
+    number: number;
+    htmlUrl: string;
+    title: string;
+    state: string;
+    createdAt: string;
+    head: string;
+    base: string;
+  }> {
+    if (!userToken) {
+      throw classifyGitHubError(
+        401,
+        'Contributor write authorization token is required to open a pull request.',
+        undefined,
+        'other'
+      );
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${userToken}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.3',
+    };
+
+    const response = await fetch(
+      `https://api.github.com/repos/${upstreamOwner}/${upstreamRepo}/pulls`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: data.title,
+          body: data.body,
+          head: data.head,
+          base: data.base,
+          draft: Boolean(data.draft),
+        }),
+      }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const pr = parsed.json || {};
+    return {
+      id: pr.id,
+      number: pr.number,
+      htmlUrl: pr.html_url,
+      title: pr.title,
+      state: pr.state || 'open',
+      createdAt: pr.created_at || new Date().toISOString(),
+      head: pr.head?.label || data.head,
+      base: pr.base?.ref || data.base,
+    };
+  }
+
+  /**
+   * Updates a Git branch reference on the contributor fork.
+   * NEVER force-pushes: force must remain false.
+   */
+  async updateBranchRef(
+    forkOwner: string,
+    forkRepo: string,
+    branchName: string,
+    sha: string,
+    force: boolean,
+    userToken: string
+  ): Promise<{ ref: string; sha: string; updated: boolean }> {
+    if (!userToken) {
+      throw classifyGitHubError(
+        401,
+        'Contributor write authorization token is required to update branch reference.',
+        undefined,
+        'source_file'
+      );
+    }
+
+    // Force push strictly prohibited in COSInput
+    if (force) {
+      throw classifyGitHubError(
+        400,
+        'Force pushing is strictly prohibited by COSInput invariant safety rules.',
+        undefined,
+        'source_file'
+      );
+    }
+
+    const cleanBranch = branchName.replace(/^refs\/heads\//, '');
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${userToken}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.4.3',
+    };
+
+    const response = await fetch(
+      `https://api.github.com/repos/${forkOwner}/${forkRepo}/git/refs/heads/${cleanBranch}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          sha,
+          force: false,
+        }),
+      }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && (parsed.json.message || parsed.json.error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'source_file');
+    }
+
+    const data = parsed.json || {};
+    return {
+      ref: data.ref || `refs/heads/${cleanBranch}`,
+      sha: data.object?.sha || sha,
+      updated: true,
+    };
+  }
 }
 
 export const githubServerClient = new GitHubServerClient();
+

@@ -70,6 +70,26 @@ export interface IGitHubService {
   approveForkCreation(id: string): Promise<{ success: boolean; session: any }>;
   approveBranchCreation(id: string): Promise<{ success: boolean; session: any }>;
 
+  // v0.4.2 Controlled Issue Implementation Runner methods
+  getExecutionPreview(id: string): Promise<{ success: boolean; preview: any }>;
+  startExecution(id: string): Promise<{ success: boolean; session: any }>;
+  stopExecution(id: string): Promise<{ success: boolean; session: any }>;
+  resetExecution(id: string): Promise<{ success: boolean; session: any }>;
+
+  // v0.4.3 Controlled Submission methods (Commit, Push, Pull Request)
+  getSubmissionReview(id: string): Promise<{ success: boolean; review: any }>;
+  approveCommit(
+    id: string,
+    params?: { approvedFiles?: string[]; customCommitMessage?: string; proceedDespiteFailureAck?: boolean }
+  ): Promise<{ success: boolean; session: any }>;
+  approvePush(id: string): Promise<{ success: boolean; session: any }>;
+  approvePullRequest(
+    id: string,
+    params?: { title?: string; body?: string }
+  ): Promise<{ success: boolean; session: any }>;
+  resetSubmission(id: string): Promise<{ success: boolean; session: any }>;
+  getWorkspaceExecutionStatus(id: string): Promise<{ success: boolean; status: any }>;
+
   // Reserved write methods (Strictly disabled in v0.2/v0.3 production UI)
   createBranch(owner: string, repo: string, branchName: string, baseSha: string): Promise<{ ref: string; sha: string }>;
   pushCommit(owner: string, repo: string, branch: string, message: string, changes: unknown[]): Promise<{ sha: string }>;
@@ -395,6 +415,65 @@ export class RealGitHubService implements IGitHubService {
       {
         method: 'POST',
       }
+    );
+  }
+
+  // v0.4.3 Controlled Submission methods
+  async getSubmissionReview(id: string): Promise<{ success: boolean; review: any }> {
+    return this.fetchApi<{ success: boolean; review: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/review`
+    );
+  }
+
+  async approveCommit(
+    id: string,
+    params: { approvedFiles?: string[]; customCommitMessage?: string; proceedDespiteFailureAck?: boolean } = {}
+  ): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/approve-commit`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      }
+    );
+  }
+
+  async approvePush(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/approve-push`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async approvePullRequest(
+    id: string,
+    params: { title?: string; body?: string } = {}
+  ): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/approve-pr`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      }
+    );
+  }
+
+  async resetSubmission(id: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/reset`,
+      {
+        method: 'POST',
+      }
+    );
+  }
+
+  async getWorkspaceExecutionStatus(id: string): Promise<{ success: boolean; status: any }> {
+    return this.fetchApi<{ success: boolean; status: any }>(
+      `/api/github/contributions/${encodeURIComponent(id)}/submission/workspace-status`
     );
   }
 

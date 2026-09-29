@@ -52,6 +52,25 @@ export class UserAuthStore {
   }
 
   /**
+   * Sets user access token directly.
+   */
+  setUserToken(token: string, sessionKey: string = DEFAULT_SESSION_KEY): void {
+    const existing = userSessions.get(sessionKey);
+    userSessions.set(sessionKey, {
+      token,
+      profile: existing?.profile || {
+        id: 'usr-default',
+        login: 'contributor',
+        name: 'Contributor',
+        avatarUrl: '',
+        authSource: 'oauth',
+        authenticatedAt: new Date().toISOString(),
+      },
+      createdAt: Date.now(),
+    });
+  }
+
+  /**
    * Sets user profile directly (e.g. for user discovery).
    */
   setUserProfileOnly(profile: GitHubUserProfile, sessionKey: string = DEFAULT_SESSION_KEY): void {
@@ -61,6 +80,13 @@ export class UserAuthStore {
       profile,
       createdAt: Date.now(),
     });
+  }
+
+  /**
+   * Sets safe user profile for active session.
+   */
+  setUserProfile(profile: GitHubUserProfile, sessionKey: string = DEFAULT_SESSION_KEY): void {
+    this.setUserProfileOnly(profile, sessionKey);
   }
 
   /**
