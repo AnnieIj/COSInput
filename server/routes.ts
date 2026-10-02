@@ -16,6 +16,8 @@ import { workspacePreparationService } from './workspacePreparationService';
 import { implementationRunnerService } from './implementationRunnerService';
 import { controlledSubmissionService } from './submissionService';
 import { workspaceExecutionEngine } from './workspaceExecutionEngine';
+import { pilotService } from './pilotService';
+import { ciGuardianService } from './ciGuardianService';
 import type { SanitizedGitHubError } from './types';
 
 export const githubRouter = Router();
@@ -223,6 +225,49 @@ githubRouter.get('/issues/:owner/:repo/:number/comments', async (req, res) => {
 
     const comments = await githubServerClient.listIssueComments(installationId, owner, repo, issueNumber, userToken || undefined);
     res.json({ comments });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({ error: err });
+  }
+});
+
+/**
+ * GET /api/github/pulls
+ * Returns pull requests for a repository or across authorized repositories.
+ */
+githubRouter.get('/pulls', async (req, res) => {
+  try {
+    const owner = req.query.owner as string | undefined;
+    const repo = req.query.repo as string | undefined;
+    const state = (req.query.state as 'open' | 'closed' | 'all') || 'open';
+    const userToken = userAuthStore.getUserToken();
+
+    if (owner && repo) {
+      const pulls = await githubServerClient.listPullRequests(owner, repo, { state }, userToken || undefined);
+      return res.json({ pulls, totalCount: pulls.length });
+    }
+
+    try {
+      const installations = await githubServerClient.listInstallations();
+      if (installations.length > 0) {
+        const reposData = await githubServerClient.listInstallationRepositories(installations[0].id);
+        const pullsResults: any[] = [];
+        const reposToQuery = reposData.repositories.slice(0, 3);
+        for (const r of reposToQuery) {
+          try {
+            const repoPulls = await githubServerClient.listPullRequests(r.owner, r.name, { state }, userToken || undefined);
+            pullsResults.push(...repoPulls.map((p) => ({ ...p, repository: `${r.owner}/${r.name}` })));
+          } catch {
+            // Ignore single repo failure
+          }
+        }
+        return res.json({ pulls: pullsResults, totalCount: pullsResults.length });
+      }
+    } catch {
+      // Fall through
+    }
+
+    res.json({ pulls: [], totalCount: 0 });
   } catch (err: any) {
     const status = err.statusCode || 500;
     res.status(status).json({ error: err });
@@ -549,6 +594,19 @@ githubRouter.post('/user/disconnect', (_req, res) => {
  * Strictly read-only relative to GitHub.
  * ============================================================================
  */
+
+/**
+ * GET /api/github/contributions
+ * Returns all active local contribution sessions.
+ */
+githubRouter.get('/contributions', (_req, res) => {
+  const sessions = contributionSessionStore.listSessions();
+  res.json({
+    success: true,
+    sessions,
+    totalCount: sessions.length,
+  });
+});
 
 /**
  * POST /api/github/contributions/session
@@ -1274,6 +1332,380 @@ githubRouter.get('/contributions/:id/submission/workspace-status', async (req, r
         classification: 'GITHUB_SERVICE_FAILURE',
         statusCode: 500,
         message: err.message || 'Failed to inspect workspace status.',
+      },
+    });
+  }
+});
+
+/**
+ * ============================================================================
+ * COSInput Foundation v0.4.4 — First Real Contributor Pilot Endpoints
+ * ============================================================================
+ */
+
+/**
+ * GET /api/github/pilot/eligibility
+ * Checks whether an issue is eligible for the first real contributor pilot.
+ */
+githubRouter.get('/pilot/eligibility', async (req, res) => {
+  try {
+    const owner = req.query.owner as string;
+    const repo = req.query.repo as string;
+    const issueNumber = parseInt(req.query.issueNumber as string, 10);
+    const userProfile = userAuthStore.getUserProfile();
+    const appStatus = await githubServerClient.getConnectionStatus().catch(() => ({ activeInstallation: null }));
+    const contributorUsername = userProfile?.login || appStatus?.activeInstallation?.accountLogin || undefined;
+
+    if (!owner || !repo || !issueNumber) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'owner, repo, and issueNumber are required to check pilot eligibility.',
+        },
+      });
+    }
+
+    const eligibility = await pilotService.verifyPilotIssueEligibility(
+      owner,
+      repo,
+      issueNumber,
+      contributorUsername
+    );
+
+    res.json({
+      success: true,
+      eligibility,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to check pilot eligibility.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/pilot/select
+ * Selects an eligible issue and initializes the pilot session.
+ */
+githubRouter.post('/pilot/select', async (req, res) => {
+  try {
+    const { owner, repo, issueNumber, issueTitle, issueUrl, repoAuthorizationStatus } = req.body;
+    if (!owner || !repo || !issueNumber) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'owner, repo, and issueNumber are required to select pilot issue.',
+        },
+      });
+    }
+
+    const session = await pilotService.selectPilotIssue({
+      owner,
+      repo,
+      issueNumber: Number(issueNumber),
+      issueTitle,
+      issueUrl,
+      repoAuthorizationStatus,
+    });
+
+    res.json({
+      success: true,
+      session,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to select pilot issue.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/pilot/:id/plan
+ * Generates grounded implementation plan for the pilot issue.
+ */
+githubRouter.post('/pilot/:id/plan', async (req, res) => {
+  try {
+    const updated = await pilotService.generatePilotPlan(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to generate pilot plan.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/pilot/:id/approve-plan
+ * Explicit human approval gate for the pilot implementation plan.
+ */
+githubRouter.post('/pilot/:id/approve-plan', async (req, res) => {
+  try {
+    const updated = await pilotService.approvePilotPlan(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to approve pilot plan.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/pilot/:id/execute
+ * Executes pilot implementation on verified git workspace branch with verification runner.
+ */
+githubRouter.post('/pilot/:id/execute', async (req, res) => {
+  try {
+    const updated = await pilotService.runPilotExecution(req.params.id);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to execute pilot run.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/pilot/:id/review
+ * Human review gate for pilot run review and decision.
+ */
+githubRouter.post('/pilot/:id/review', async (req, res) => {
+  try {
+    const { decision, feedback } = req.body || {};
+    const updated = await pilotService.reviewPilot(req.params.id, decision || 'APPROVE', feedback);
+    res.json({
+      success: true,
+      session: updated,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to submit pilot review.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/pilot/:id/report
+ * Returns the comprehensive pilot final report.
+ */
+githubRouter.get('/pilot/:id/report', (req, res) => {
+  try {
+    const decision = req.query.decision as any;
+    const report = pilotService.generatePilotFinalReport(req.params.id, decision);
+    res.json({
+      success: true,
+      report,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to generate pilot final report.',
+      },
+    });
+  }
+});
+
+/**
+ * ============================================================================
+ * COSInput Foundation v0.5.1 — Read-Only CI Guardian Endpoints
+ * ============================================================================
+ */
+
+/**
+ * GET /api/github/guardian/pulls
+ * Discovers authorized contributor pull requests across local sessions,
+ * App installations, and contributor forks.
+ */
+githubRouter.get('/guardian/pulls', async (req, res) => {
+  try {
+    const userProfile = userAuthStore.getUserProfile();
+    const userToken = userAuthStore.getUserToken() || undefined;
+    const contributorUsername = (req.query.contributor as string) || userProfile?.login || undefined;
+
+    const pulls = await ciGuardianService.discoverPullRequests(contributorUsername, userToken);
+    res.json({
+      success: true,
+      pulls,
+      totalCount: pulls.length,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to discover contributor pull requests.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/guardian/inspect
+ * Inspects CI status, checks, failure evidence, and diagnosis for a specific pull request.
+ */
+githubRouter.get('/guardian/inspect', async (req, res) => {
+  try {
+    const owner = req.query.owner as string;
+    const repo = req.query.repo as string;
+    const pullNumber = parseInt(req.query.pullNumber as string, 10);
+    const forceRefresh = req.query.refresh === 'true';
+    const userToken = userAuthStore.getUserToken() || undefined;
+
+    if (!owner || !repo || !pullNumber || isNaN(pullNumber)) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'owner, repo, and valid pullNumber are required to inspect CI status.',
+        },
+      });
+    }
+
+    const observation = await ciGuardianService.inspectPullRequestCi(
+      owner,
+      repo,
+      pullNumber,
+      { forceRefresh, userToken }
+    );
+
+    res.json({
+      success: true,
+      observation,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to inspect pull request CI status.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/guardian/refresh
+ * Explicit manual refresh of CI status for a specific pull request.
+ */
+githubRouter.post('/guardian/refresh', async (req, res) => {
+  try {
+    const { owner, repo, pullNumber } = req.body || {};
+    const userToken = userAuthStore.getUserToken() || undefined;
+
+    if (!owner || !repo || !pullNumber) {
+      return res.status(400).json({
+        error: {
+          classification: 'AUTHENTICATION_FAILURE',
+          statusCode: 400,
+          message: 'owner, repo, and pullNumber are required to refresh CI status.',
+        },
+      });
+    }
+
+    const observation = await ciGuardianService.refreshPullRequestCi(
+      owner,
+      repo,
+      Number(pullNumber),
+      userToken
+    );
+
+    res.json({
+      success: true,
+      observation,
+    });
+  } catch (err: any) {
+    const status = err.statusCode || 500;
+    res.status(status).json({
+      error: err.classification ? err : {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: status,
+        message: err.message || 'Failed to refresh pull request CI status.',
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/github/guardian/observations
+ * Lists all active observations tracked by the Guardian surveillance engine.
+ */
+githubRouter.get('/guardian/observations', (_req, res) => {
+  try {
+    const observations = ciGuardianService.listObservations();
+    res.json({
+      success: true,
+      observations,
+      totalCount: observations.length,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      error: {
+        classification: 'GITHUB_SERVICE_FAILURE',
+        statusCode: 500,
+        message: err.message || 'Failed to list Guardian observations.',
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/github/guardian/execute-repair
+ * Strictly forbidden in v0.5.1! Verified invariant rejection of write operations.
+ */
+githubRouter.post('/guardian/execute-repair', async (_req, res) => {
+  try {
+    await ciGuardianService.executeRepair();
+  } catch (err: any) {
+    return res.status(403).json({
+      error: {
+        classification: 'AUTHORIZATION_FAILURE',
+        statusCode: 403,
+        message: err.message,
       },
     });
   }

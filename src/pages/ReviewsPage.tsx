@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useToast } from '../context/ToastContext';
 import { mockRun8f92a10c } from '../data/mock';
 import { ReviewComments } from '../components/common/ReviewComments';
 
 export const ReviewsPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [replyText, setReplyText] = useState('');
   const [showReplyBox, setShowReplyBox] = useState(false);
+  const [patchApplied, setPatchApplied] = useState(false);
 
   const review = mockRun8f92a10c.reviewData;
 
@@ -94,7 +97,8 @@ export const ReviewsPage: React.FC = () => {
         comment={review.comment}
         proposedResolution={review.proposedResolution}
         onApplyPatch={() => {
-          alert("Applied BigInt units scaling patch to branch cosinput/381-verification-stake!");
+          setPatchApplied(true);
+          toast.success("Applied BigInt units scaling patch to branch cosinput/381-verification-stake!");
         }}
         onDraftReply={() => setShowReplyBox(true)}
       />
@@ -144,7 +148,7 @@ export const ReviewsPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  alert("Reply queued for transmission upon explicit GitHub token signoff.");
+                  toast.success("Reply queued for transmission upon explicit GitHub token signoff.");
                   setShowReplyBox(false);
                 }}
                 className="px-4 py-1.5 rounded-lg bg-primary text-on-primary hover:bg-primary-container font-label-md text-label-md font-semibold shadow-sm"

@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useToast } from '../context/ToastContext';
 import { githubService } from '../services/github.service';
 import type {
   ContributionSession,
@@ -29,6 +30,7 @@ export const SubmissionReviewPanel: React.FC<SubmissionReviewPanelProps> = ({
   onSessionUpdated,
   onError,
 }) => {
+  const { toast } = useToast();
   const [review, setReview] = useState<SubmissionReviewData | null>(null);
   const [loadingReview, setLoadingReview] = useState<boolean>(true);
   const [workspaceStatus, setWorkspaceStatus] = useState<any>(null);
@@ -88,11 +90,11 @@ export const SubmissionReviewPanel: React.FC<SubmissionReviewPanelProps> = ({
   // Handler for Commit approval
   const handleApproveCommit = async () => {
     if (selectedFiles.length === 0) {
-      alert('You must select at least one approved file to stage.');
+      toast.warning('You must select at least one approved file to stage.');
       return;
     }
     if (review?.hasVerificationFailure && !proceedDespiteFailureAck) {
-      alert('Please check the acknowledgement to proceed despite verification failures.');
+      toast.warning('Please check the acknowledgement to proceed despite verification failures.');
       return;
     }
 

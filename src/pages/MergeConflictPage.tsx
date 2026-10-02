@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useToast } from '../context/ToastContext';
 import { mockMergeConflictsData } from '../data/mock';
 import { ConflictStatusCanvas } from '../components/common/ConflictStatusCanvas';
 
 export const MergeConflictPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [activeFileId, setActiveFileId] = useState('stakeform');
   const [rebased, setRebased] = useState(false);
   const [rebasing, setRebasing] = useState(false);
@@ -18,8 +20,8 @@ export const MergeConflictPage: React.FC = () => {
     setTimeout(() => {
       setRebasing(false);
       setRebased(true);
-      alert("Branch cosinput/381-verification-stake cleanly rebased onto upstream main with zero code loss.");
-    }, 1200);
+      toast.success("Branch cosinput/381-verification-stake cleanly rebased onto upstream main with zero code loss.");
+    }, 1000);
   };
 
   return (
@@ -287,7 +289,7 @@ export const MergeConflictPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => alert("Simulating Vitest & Playwright e2e suites against synthesized conflict resolution...")}
+            onClick={() => toast.info("Simulating Vitest & Playwright e2e suites against synthesized conflict resolution...")}
             className="px-3.5 py-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm flex items-center gap-1.5 transition-all"
           >
             <span className="material-symbols-outlined text-[16px] text-primary">play_arrow</span>
@@ -298,7 +300,7 @@ export const MergeConflictPage: React.FC = () => {
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
           <button
             type="button"
-            onClick={() => alert("Opening AST in-browser patch editor for " + currentFile.path)}
+            onClick={() => toast.info("Opening AST in-browser patch editor for " + currentFile.path)}
             className="px-3.5 py-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm flex items-center gap-1.5 transition-all"
           >
             <span className="material-symbols-outlined text-[16px]">edit_note</span>

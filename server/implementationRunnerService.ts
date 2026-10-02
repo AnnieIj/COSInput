@@ -80,6 +80,43 @@ export class ImplementationRunnerService {
       reason: string;
     }[] = [];
 
+    // For pilot runs with explicit build/lint or test verification, prioritize grounded plan commands
+    if (session.isPilotRun && session.implementationPlan) {
+      const pilotCommands: {
+        type: 'test' | 'typecheck' | 'lint' | 'build';
+        command: string;
+        reason: string;
+      }[] = [];
+
+      if (session.implementationPlan.testsToRun && session.implementationPlan.testsToRun.length > 0) {
+        for (const tCmd of session.implementationPlan.testsToRun) {
+          pilotCommands.push({
+            type: 'test',
+            command: tCmd,
+            reason: `Grounded test execution: ${tCmd}`,
+          });
+        }
+      }
+
+      if (session.implementationPlan.buildLintVerification && session.implementationPlan.buildLintVerification.length > 0) {
+        for (const blCmd of session.implementationPlan.buildLintVerification) {
+          let type: 'test' | 'typecheck' | 'lint' | 'build' = 'build';
+          if (blCmd.includes('test')) type = 'test';
+          else if (blCmd.includes('lint')) type = 'lint';
+          else if (blCmd.includes('tsc') || blCmd.includes('typecheck')) type = 'typecheck';
+          pilotCommands.push({
+            type,
+            command: blCmd,
+            reason: `Grounded verification command: ${blCmd}`,
+          });
+        }
+      }
+
+      if (pilotCommands.length > 0) {
+        return pilotCommands;
+      }
+    }
+
     // Test command
     let testCmd = `${pkgManager} test`;
     if (session.implementationPlan?.testsToRun && session.implementationPlan.testsToRun.length > 0) {
@@ -273,7 +310,7 @@ export class ImplementationRunnerService {
         defaultBranch,
         userToken
       );
-      currentHeadSha = branchInfo.commitSha;
+      currentHeadSha = branchInfo.commitSha || (branchInfo as any).sha;
     } catch (err: any) {
       if (err.classification === 'RATE_LIMIT') {
         throw err;
@@ -568,6 +605,7 @@ export class ImplementationRunnerService {
       exitCode: 0,
       outputSummary: `${modifiedFiles.length} file(s) changed, focused modifications consistent with coding conventions.`,
       passed: true,
+      outcome: 'PASSED',
       timestamp: new Date().toISOString(),
       durationMs: 45,
     });
@@ -597,6 +635,14 @@ export class ImplementationRunnerService {
       }
 
       const passed = exitCode === 0;
+      let outcome: 'PASSED' | 'FAILED' | 'BLOCKED' | 'NOT_RUN' = passed ? 'PASSED' : 'FAILED';
+      let blockReason: string | undefined;
+
+      if (!passed && (exitCode === 126 || exitCode === 127 || output.toLowerCase().includes('not found') || output.toLowerCase().includes('command not found'))) {
+        outcome = 'BLOCKED';
+        blockReason = `Tooling or command execution blocked: ${output}`;
+      }
+
       const verificationRecord: VerificationResultItem = {
         id: `step-${cmdItem.type}`,
         type: cmdItem.type,
@@ -604,6 +650,8 @@ export class ImplementationRunnerService {
         exitCode,
         outputSummary: output,
         passed,
+        outcome,
+        blockReason,
         timestamp: new Date().toISOString(),
         durationMs: Date.now() - startTime,
       };
@@ -720,9 +768,9 @@ export class ImplementationRunnerService {
       })),
       acceptanceEvidence: acceptanceCriteriaEvidence.map((a) => ({
         criterionId: a.criterionId,
-        criterion: a.description,
+        criterion: a.description || a.criterionDescription || a.criterion || '',
         status: a.verified ? 'VERIFIED' : 'FAILED',
-        evidence: a.evidence,
+        evidence: a.evidence || a.verificationDetail || '',
       })),
       actualResults: isAllPassed
         ? 'SUCCESS'

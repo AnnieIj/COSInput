@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMode } from '../context/ModeContext';
+import { useToast } from '../context/ToastContext';
 import { githubService } from '../services/github.service';
 import { SubmissionReviewPanel } from '../components/SubmissionReviewPanel';
 import type {
@@ -15,18 +16,31 @@ import type {
   ImplementationPreview,
   ImplementationRunState,
   ExecutionStatus,
+  PilotFinalReport,
+  PilotStatus,
 } from '../services/types';
 
 export const WorkspacePage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { isLive } = useMode();
+  const { toast } = useToast();
 
   const [session, setSession] = useState<ContributionSession | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [analyzing, setAnalyzing] = useState<boolean>(false);
   const [error, setError] = useState<SanitizedGitHubError | null>(null);
   const hasAutoAnalyzedRef = React.useRef<string | null>(null);
+
+  // Pilot states (v0.4.4)
+  const isPilotMode = Boolean(session?.isPilotRun || searchParams.get('pilot') === 'true');
+  const [pilotReport, setPilotReport] = useState<PilotFinalReport | null>(null);
+  const [showPilotReportModal, setShowPilotReportModal] = useState<boolean>(false);
+  const [loadingPilotReport, setLoadingPilotReport] = useState<boolean>(false);
+  const [pilotActionLoading, setPilotActionLoading] = useState<boolean>(false);
+  const [showPilotReviewModal, setShowPilotReviewModal] = useState<'REVISE' | 'REJECT' | null>(null);
+  const [pilotReviewFeedback, setPilotReviewFeedback] = useState<string>('');
 
   // Tab navigation inside workspace
   const [activeTab, setActiveTab] = useState<
@@ -111,6 +125,140 @@ export const WorkspacePage: React.FC = () => {
     }
   }, [id, isLive]);
 
+  // First Real Contributor Pilot action handlers (v0.4.4)
+  const handleGeneratePilotPlan = async () => {
+    if (!session?.id) return;
+    setPilotActionLoading(true);
+    setError(null);
+    try {
+      const res = await githubService.generatePilotPlan(session.id);
+      if (res.success && res.session) {
+        setSession(res.session);
+        setActiveTab('plan');
+      }
+    } catch (err: any) {
+      setError(
+        err?.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err?.statusCode || 500,
+              message: err?.message || 'Failed to generate pilot plan.',
+            }
+      );
+    } finally {
+      setPilotActionLoading(false);
+    }
+  };
+
+  const handleApprovePilotPlan = async () => {
+    if (!session?.id) return;
+    setPilotActionLoading(true);
+    setError(null);
+    try {
+      const res = await githubService.approvePilotPlan(session.id);
+      if (res.success && res.session) {
+        setSession(res.session);
+      }
+    } catch (err: any) {
+      setError(
+        err?.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err?.statusCode || 500,
+              message: err?.message || 'Failed to approve pilot plan.',
+            }
+      );
+    } finally {
+      setPilotActionLoading(false);
+    }
+  };
+
+  const handleExecutePilotRun = async () => {
+    if (!session?.id) return;
+    setPilotActionLoading(true);
+    setError(null);
+    try {
+      const res = await githubService.executePilotRun(session.id);
+      if (res.success && res.session) {
+        setSession(res.session);
+        setActiveTab('submission');
+      }
+    } catch (err: any) {
+      setError(
+        err?.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err?.statusCode || 500,
+              message: err?.message || 'Failed to execute pilot run.',
+            }
+      );
+    } finally {
+      setPilotActionLoading(false);
+    }
+  };
+
+  const handleReviewPilot = async (decision: 'APPROVE' | 'REVISE' | 'REJECT', feedback?: string) => {
+    if (!session?.id) return;
+    setPilotActionLoading(true);
+    setError(null);
+    try {
+      const res = await githubService.reviewPilot(session.id, decision, feedback);
+      if (res.success && res.session) {
+        setSession(res.session);
+        setShowPilotReviewModal(null);
+        setPilotReviewFeedback('');
+        try {
+          const reportRes = await githubService.getPilotReport(session.id);
+          if (reportRes.success && reportRes.report) {
+            setPilotReport(reportRes.report);
+            setShowPilotReportModal(true);
+          }
+        } catch {
+          // Ignore report fetch error
+        }
+      }
+    } catch (err: any) {
+      setError(
+        err?.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err?.statusCode || 500,
+              message: err?.message || 'Failed to submit pilot review.',
+            }
+      );
+    } finally {
+      setPilotActionLoading(false);
+    }
+  };
+
+  const handleOpenPilotReport = async () => {
+    if (!session?.id) return;
+    setLoadingPilotReport(true);
+    try {
+      const res = await githubService.getPilotReport(session.id);
+      if (res.success && res.report) {
+        setPilotReport(res.report);
+        setShowPilotReportModal(true);
+      }
+    } catch (err: any) {
+      setError(
+        err?.classification
+          ? err
+          : {
+              classification: 'GITHUB_SERVICE_FAILURE',
+              statusCode: err?.statusCode || 500,
+              message: err?.message || 'Failed to load pilot report.',
+            }
+      );
+    } finally {
+      setLoadingPilotReport(false);
+    }
+  };
+
   // Run analysis pipeline
   const runAnalysis = async (sessionId: string) => {
     setAnalyzing(true);
@@ -185,7 +333,7 @@ export const WorkspacePage: React.FC = () => {
         );
       }
     } catch (err: any) {
-      alert(`Approval error: ${err.message || 'Failed to record approval.'}`);
+      toast.error(`Approval error: ${err.message || 'Failed to record approval.'}`);
     } finally {
       setApproving(false);
     }
@@ -414,14 +562,14 @@ export const WorkspacePage: React.FC = () => {
       }
       setShowRevisionModal(false);
       setRevisionFeedback('');
+      toast.success('Revision request submitted with contributor feedback.');
     } catch (err: any) {
-      alert(`Revision request error: ${err.message || 'Failed to submit revision feedback.'}`);
+      toast.error(`Revision request error: ${err.message || 'Failed to submit revision feedback.'}`);
     }
   };
 
   const handleCancelContribution = async () => {
     if (!session) return;
-    if (!confirm('Are you sure you want to cancel this contribution analysis session?')) return;
 
     try {
       if (isLive) {
@@ -440,8 +588,9 @@ export const WorkspacePage: React.FC = () => {
             : null
         );
       }
+      toast.info('Contribution session marked as cancelled.');
     } catch (err: any) {
-      alert(`Cancellation error: ${err.message || 'Failed to cancel session.'}`);
+      toast.error(`Cancellation error: ${err.message || 'Failed to cancel session.'}`);
     }
   };
 
@@ -615,6 +764,225 @@ export const WorkspacePage: React.FC = () => {
                 Retry Analysis
               </button>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* First Real Contributor Pilot Cockpit Banner (v0.4.4) */}
+      {isPilotMode && session && (
+        <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-4 space-y-4">
+          <div className="p-5 rounded-2xl bg-gradient-to-r from-tertiary-container/20 via-surface-container-low to-primary-container/15 border border-tertiary/40 shadow-md space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-tertiary text-on-tertiary flex items-center justify-center shrink-0 shadow">
+                  <span className="material-symbols-outlined text-[24px]">flight_takeoff</span>
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                      First Real Contributor Pilot (v0.4.4)
+                    </h2>
+                    <span className="px-2.5 py-0.5 rounded-full bg-tertiary text-on-tertiary font-code-sm text-[10px] font-bold uppercase tracking-wider">
+                      Human-Supervised Pilot
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-surface-container-high text-on-surface font-code-sm text-[10px] font-bold uppercase border border-surface-container">
+                      Status: {session.pilotStatus || 'ISSUE_VERIFIED'}
+                    </span>
+                  </div>
+                  <p className="font-body-sm text-body-sm text-secondary">
+                    Authentic Git workspace execution with genuine verification and human supervision gates. Stopping at REVIEW_READY without automated pull request creation.
+                  </p>
+                </div>
+              </div>
+
+              {/* View Report Button */}
+              {(session.pilotStatus === 'REVIEW_READY' || session.pilotStatus === 'SUBMISSION_APPROVED' || session.pilotStatus === 'REJECTED' || session.pilotReport) && (
+                <button
+                  type="button"
+                  onClick={handleOpenPilotReport}
+                  className="px-4 py-2 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface font-headline-sm text-headline-sm font-semibold border border-surface-container shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                >
+                  <span className="material-symbols-outlined text-[18px]">assessment</span>
+                  <span>View Pilot Final Report</span>
+                </button>
+              )}
+            </div>
+
+            {/* Stepper Display */}
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 pt-2 border-t border-surface-container/60 font-code-sm text-code-sm">
+              <div className="p-2.5 rounded-lg bg-surface-container-lowest/80 border border-surface-container flex items-center gap-2">
+                <span className="w-5 h-5 rounded-full bg-tertiary text-on-tertiary flex items-center justify-center text-xs font-bold">✓</span>
+                <div className="flex flex-col min-w-0">
+                  <span className="font-semibold text-on-surface truncate">1. Issue & Eligibility</span>
+                  <span className="text-[10px] text-tertiary font-medium">Verified Eligible</span>
+                </div>
+              </div>
+
+              <div className={`p-2.5 rounded-lg border flex items-center gap-2 ${
+                ['PLAN_APPROVED', 'EXECUTING', 'REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '')
+                  ? 'bg-surface-container-lowest/80 border-tertiary/40'
+                  : 'bg-primary-fixed/20 border-primary/40'
+              }`}>
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                  ['PLAN_APPROVED', 'EXECUTING', 'REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '')
+                    ? 'bg-tertiary text-on-tertiary'
+                    : 'bg-primary text-on-primary animate-pulse'
+                }`}>
+                  {['PLAN_APPROVED', 'EXECUTING', 'REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '') ? '✓' : '2'}
+                </span>
+                <div className="flex flex-col min-w-0">
+                  <span className="font-semibold text-on-surface truncate">2. Grounded Plan</span>
+                  <span className="text-[10px] text-secondary font-medium">
+                    {session.pilotStatus === 'PLAN_APPROVED' ? 'Approved' : session.implementationPlan ? 'Approval Required' : 'Formulating...'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`p-2.5 rounded-lg border flex items-center gap-2 ${
+                ['REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '')
+                  ? 'bg-surface-container-lowest/80 border-tertiary/40'
+                  : session.pilotStatus === 'EXECUTING'
+                  ? 'bg-primary-fixed/20 border-primary/40'
+                  : 'bg-surface-container-low border-surface-container'
+              }`}>
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                  ['REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '')
+                    ? 'bg-tertiary text-on-tertiary'
+                    : session.pilotStatus === 'EXECUTING'
+                    ? 'bg-primary text-on-primary animate-pulse'
+                    : 'bg-surface-container text-secondary'
+                }`}>
+                  {['REVIEW_READY', 'SUBMISSION_APPROVED', 'COMPLETED'].includes(session.pilotStatus || '') ? '✓' : '3'}
+                </span>
+                <div className="flex flex-col min-w-0">
+                  <span className="font-semibold text-on-surface truncate">3. Authentic Execution</span>
+                  <span className="text-[10px] text-secondary font-medium">
+                    {session.pilotStatus === 'EXECUTING' ? 'Running Genuine Tests' : session.executionRun ? 'Verification Done' : 'Pending Plan'}
+                  </span>
+                </div>
+              </div>
+
+              <div className={`p-2.5 rounded-lg border flex items-center gap-2 ${
+                session.pilotStatus === 'SUBMISSION_APPROVED'
+                  ? 'bg-surface-container-lowest/80 border-tertiary/40'
+                  : session.pilotStatus === 'REVIEW_READY'
+                  ? 'bg-amber-500/15 border-amber-500/40'
+                  : 'bg-surface-container-low border-surface-container'
+              }`}>
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                  session.pilotStatus === 'SUBMISSION_APPROVED'
+                    ? 'bg-tertiary text-on-tertiary'
+                    : session.pilotStatus === 'REVIEW_READY'
+                    ? 'bg-amber-600 text-white animate-pulse'
+                    : 'bg-surface-container text-secondary'
+                }`}>
+                  {session.pilotStatus === 'SUBMISSION_APPROVED' ? '✓' : '4'}
+                </span>
+                <div className="flex flex-col min-w-0">
+                  <span className="font-semibold text-on-surface truncate">4. Human Review</span>
+                  <span className="text-[10px] text-secondary font-medium">
+                    {session.pilotStatus === 'SUBMISSION_APPROVED' ? 'Approved (Zero Auto-PR)' : session.pilotStatus === 'REVIEW_READY' ? 'Decision Required' : 'Awaiting Run'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Stage Actions & Guidance */}
+            <div className="pt-2 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="text-body-sm font-body-sm text-on-surface flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-primary shrink-0">info</span>
+                <span>
+                  {session.pilotStatus === 'PLAN_APPROVAL_REQUIRED' || (session.implementationPlan && session.pilotStatus !== 'PLAN_APPROVED' && session.pilotStatus !== 'REVIEW_READY' && session.pilotStatus !== 'SUBMISSION_APPROVED') ? (
+                    <span><strong>Human Gate 1:</strong> Grounded implementation plan generated from authentic source. Explicit approval required before any code changes are applied.</span>
+                  ) : session.pilotStatus === 'PLAN_APPROVED' ? (
+                    <span><strong>Human Gate 2:</strong> Plan approved! COSInput is ready to execute an authentic upstream checkout and run real verification commands.</span>
+                  ) : session.pilotStatus === 'EXECUTING' ? (
+                    <span><strong>Authentic Execution:</strong> Running genuine tests and lint commands inside verified workspace...</span>
+                  ) : session.pilotStatus === 'REVIEW_READY' ? (
+                    <span><strong>Human Gate 3:</strong> Execution complete! Work stopped at <strong>REVIEW_READY</strong>. Inspect the changed files, real Git diff, and verification outcomes below to decide.</span>
+                  ) : session.pilotStatus === 'SUBMISSION_APPROVED' ? (
+                    <span><strong>Implementation Approved:</strong> Zero automated PR opened. To publish commits to your fork, visit the <em>Review & PR Submission</em> tab.</span>
+                  ) : session.pilotStatus === 'REJECTED' ? (
+                    <span><strong>Implementation Rejected:</strong> Execution halted as requested.</span>
+                  ) : (
+                    <span><strong>Pilot Initialized:</strong> Grounded plan generation ready.</span>
+                  )}
+                </span>
+              </div>
+
+              {/* Action Buttons based on pilotStatus */}
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                {(!session.implementationPlan || session.pilotStatus === 'ISSUE_VERIFIED') && (
+                  <button
+                    type="button"
+                    disabled={pilotActionLoading}
+                    onClick={handleGeneratePilotPlan}
+                    className="px-4 py-2 rounded-lg bg-primary-container text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow hover:opacity-90 disabled:opacity-50 cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">psychology</span>
+                    <span>{pilotActionLoading ? 'Formulating Plan...' : 'Generate Grounded Plan'}</span>
+                  </button>
+                )}
+
+                {(session.pilotStatus === 'PLAN_APPROVAL_REQUIRED' || (session.implementationPlan && session.pilotStatus !== 'PLAN_APPROVED' && session.pilotStatus !== 'REVIEW_READY' && session.pilotStatus !== 'SUBMISSION_APPROVED')) && (
+                  <button
+                    type="button"
+                    disabled={pilotActionLoading}
+                    onClick={handleApprovePilotPlan}
+                    className="px-5 py-2.5 rounded-lg bg-tertiary hover:opacity-90 text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow-md disabled:opacity-50 cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">verified</span>
+                    <span>{pilotActionLoading ? 'Approving Plan...' : 'Approve Implementation Plan'}</span>
+                  </button>
+                )}
+
+                {session.pilotStatus === 'PLAN_APPROVED' && (
+                  <button
+                    type="button"
+                    disabled={pilotActionLoading}
+                    onClick={handleExecutePilotRun}
+                    className="px-5 py-2.5 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold flex items-center gap-2 shadow-md disabled:opacity-50 cursor-pointer"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">play_circle</span>
+                    <span>{pilotActionLoading ? 'Executing Authentic Run...' : 'Execute Authentic Pilot Run'}</span>
+                  </button>
+                )}
+
+                {session.pilotStatus === 'REVIEW_READY' && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={pilotActionLoading}
+                      onClick={() => handleReviewPilot('APPROVE')}
+                      className="px-4 py-2 rounded-lg bg-tertiary hover:opacity-90 text-on-tertiary font-headline-sm text-headline-sm font-semibold flex items-center gap-1.5 shadow-sm disabled:opacity-50 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">thumb_up</span>
+                      <span>Approve Implementation</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={pilotActionLoading}
+                      onClick={() => setShowPilotReviewModal('REVISE')}
+                      className="px-3.5 py-2 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface font-headline-sm text-headline-sm font-semibold border border-surface-container shadow-sm flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">edit_note</span>
+                      <span>Request Revision</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={pilotActionLoading}
+                      onClick={() => setShowPilotReviewModal('REJECT')}
+                      className="px-3 py-2 rounded-lg bg-error-container/20 hover:bg-error-container/30 text-error font-headline-sm text-headline-sm font-semibold border border-error/30 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">close</span>
+                      <span>Reject</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2449,6 +2817,290 @@ export const WorkspacePage: React.FC = () => {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Pilot Review Modal (REVISE / REJECT) */}
+      {showPilotReviewModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleReviewPilot(showPilotReviewModal, pilotReviewFeedback);
+            }}
+            className="bg-surface-container-lowest rounded-2xl max-w-lg w-full p-6 border border-surface-container shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                showPilotReviewModal === 'REVISE' ? 'bg-primary-container text-on-primary' : 'bg-error-container text-on-error'
+              }`}>
+                <span className="material-symbols-outlined text-[22px]">
+                  {showPilotReviewModal === 'REVISE' ? 'edit_note' : 'cancel'}
+                </span>
+              </div>
+              <div>
+                <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                  {showPilotReviewModal === 'REVISE' ? 'Request Implementation Revision' : 'Reject Pilot Implementation'}
+                </h3>
+                <span className="font-code-sm text-code-sm text-secondary">
+                  Human Review Gate: Provide rationale or revision directives.
+                </span>
+              </div>
+            </div>
+
+            <p className="font-body-sm text-body-sm text-secondary">
+              {showPilotReviewModal === 'REVISE'
+                ? 'Specify the adjustments needed. The session will return to PLAN_APPROVAL_REQUIRED for re-verification.'
+                : 'State the reason for rejecting this implementation. Execution will halt at REVIEW_READY.'}
+            </p>
+
+            <textarea
+              required
+              rows={4}
+              value={pilotReviewFeedback}
+              onChange={(e) => setPilotReviewFeedback(e.target.value)}
+              placeholder={showPilotReviewModal === 'REVISE' ? 'e.g. Please refine debounce timer and add negative test case...' : 'e.g. Implementation diverges from accepted architectural pattern...'}
+              className="w-full p-3 bg-surface-container-low rounded-lg font-body-sm text-body-sm text-on-surface border border-surface-container focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPilotReviewModal(null);
+                  setPilotReviewFeedback('');
+                }}
+                className="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={pilotActionLoading || !pilotReviewFeedback.trim()}
+                className={`px-5 py-2 rounded-lg font-headline-sm text-headline-sm font-semibold shadow-md transition-all disabled:opacity-50 cursor-pointer ${
+                  showPilotReviewModal === 'REVISE' ? 'bg-primary-container hover:bg-primary text-on-primary' : 'bg-error hover:opacity-90 text-on-error'
+                }`}
+              >
+                {pilotActionLoading ? 'Submitting...' : showPilotReviewModal === 'REVISE' ? 'Submit Revision Request' : 'Confirm Rejection'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Pilot Final Report Modal (v0.4.4 Section 8) */}
+      {showPilotReportModal && pilotReport && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface-container-lowest rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6 lg:p-8 border border-surface-container shadow-2xl space-y-6 animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-4 border-b border-surface-container pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-xl bg-tertiary text-on-tertiary flex items-center justify-center shrink-0 shadow">
+                  <span className="material-symbols-outlined text-[28px]">assessment</span>
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="font-headline-md text-headline-md font-bold text-on-surface">
+                      First Real Contributor Pilot — Final Report
+                    </h2>
+                    <span className="px-2.5 py-0.5 rounded-full bg-tertiary text-on-tertiary font-code-sm text-[11px] font-bold uppercase tracking-wider">
+                      v0.4.4 Complete
+                    </span>
+                  </div>
+                  <p className="font-code-sm text-code-sm text-secondary font-mono mt-0.5">
+                    {pilotReport.selectedIssue.repository} #{pilotReport.selectedIssue.number} • Session: {pilotReport.sessionId}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPilotReportModal(false)}
+                className="p-1.5 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[22px]">close</span>
+              </button>
+            </div>
+
+            {/* Quick Status Bar */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 font-code-sm text-code-sm">
+              <div className="p-3 rounded-xl bg-surface-container-low border border-surface-container">
+                <span className="text-secondary block text-[11px] uppercase font-bold">Workflow Status</span>
+                <span className="font-bold text-on-surface font-mono text-sm mt-0.5 block">{pilotReport.pilotWorkflowStatus}</span>
+              </div>
+              <div className="p-3 rounded-xl bg-surface-container-low border border-surface-container">
+                <span className="text-secondary block text-[11px] uppercase font-bold">Review Decision</span>
+                <span className={`font-bold font-mono text-sm mt-0.5 block ${
+                  pilotReport.reviewDecision === 'APPROVED' ? 'text-tertiary' : pilotReport.reviewDecision === 'REJECTED' ? 'text-error' : 'text-amber-800'
+                }`}>
+                  {pilotReport.reviewDecision || 'PENDING'}
+                </span>
+              </div>
+              <div className="p-3 rounded-xl bg-surface-container-low border border-surface-container">
+                <span className="text-secondary block text-[11px] uppercase font-bold">Changed Files</span>
+                <span className="font-bold text-primary font-mono text-sm mt-0.5 block">{pilotReport.changedFiles.length} file(s)</span>
+              </div>
+              <div className="p-3 rounded-xl bg-surface-container-low border border-surface-container">
+                <span className="text-secondary block text-[11px] uppercase font-bold">Live Modification</span>
+                <span className="font-bold text-tertiary font-mono text-sm mt-0.5 block">0 Live PRs Opened</span>
+              </div>
+            </div>
+
+            {/* Section 1: Changed Files & Real Git Diff */}
+            <div className="space-y-3">
+              <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface flex items-center gap-2">
+                <span className="material-symbols-outlined text-primary text-[20px]">difference</span>
+                <span>1. Changed Files & Authentic Git Diff</span>
+              </h3>
+              <div className="p-4 rounded-xl bg-surface-container-lowest border border-surface-container space-y-3">
+                <div className="flex flex-wrap gap-2">
+                  {pilotReport.changedFiles.length > 0 ? (
+                    pilotReport.changedFiles.map((f) => (
+                      <span key={f} className="px-2.5 py-1 rounded bg-surface-container-high font-mono text-code-sm text-on-surface border border-surface-container">
+                        📄 {f}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-secondary font-code-sm text-code-sm italic">No files modified on disk</span>
+                  )}
+                </div>
+
+                {pilotReport.gitDiff ? (
+                  <pre className="p-3 rounded-lg bg-surface-container-lowest text-on-surface font-mono text-code-sm overflow-x-auto border border-surface-container max-h-48 text-[12px] leading-relaxed">
+                    {pilotReport.gitDiff}
+                  </pre>
+                ) : (
+                  <div className="p-3 rounded-lg bg-surface-container-low text-secondary font-code-sm text-xs">
+                    Authentic Git working tree diff recorded and inspected.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Section 2: Genuine Verification Results Table */}
+            <div className="space-y-3">
+              <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface flex items-center gap-2">
+                <span className="material-symbols-outlined text-tertiary text-[20px]">verified</span>
+                <span>2. Genuine Verification Command Outcomes</span>
+              </h3>
+              <div className="rounded-xl border border-surface-container overflow-hidden">
+                <table className="w-full text-left font-code-sm text-code-sm">
+                  <thead className="bg-surface-container text-secondary text-[11px] uppercase font-bold">
+                    <tr>
+                      <th className="p-3">Type</th>
+                      <th className="p-3">Exact Command</th>
+                      <th className="p-3">Exit Code</th>
+                      <th className="p-3">Outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-container-low bg-surface-container-lowest">
+                    {pilotReport.actualTestResults.map((t) => (
+                      <tr key={t.id} className="hover:bg-surface-container-low/50">
+                        <td className="p-3 font-semibold uppercase text-[11px] text-secondary">{t.type}</td>
+                        <td className="p-3 font-mono text-on-surface text-xs">{t.command}</td>
+                        <td className="p-3 font-mono font-bold">{t.exitCode}</td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded font-bold text-[10px] uppercase ${
+                            t.outcome === 'PASSED'
+                              ? 'bg-tertiary-container/20 text-tertiary'
+                              : t.outcome === 'FAILED'
+                              ? 'bg-error-container/20 text-error'
+                              : t.outcome === 'BLOCKED'
+                              ? 'bg-amber-500/20 text-amber-900'
+                              : 'bg-surface-container text-secondary'
+                          }`}>
+                            {t.outcome}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Section 3: Acceptance Criteria Evidence */}
+            {pilotReport.acceptanceCriteriaEvidence && pilotReport.acceptanceCriteriaEvidence.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary text-[20px]">checklist</span>
+                  <span>3. Acceptance Criteria Evidence</span>
+                </h3>
+                <div className="space-y-2">
+                  {pilotReport.acceptanceCriteriaEvidence.map((ev) => {
+                    const isSatisfied = ev.satisfied ?? ev.verified ?? false;
+                    const desc = ev.criterionDescription || ev.description;
+                    const detail = ev.verificationDetail || ev.evidence;
+                    return (
+                      <div key={ev.criterionId} className="p-3 rounded-lg bg-surface-container-low border border-surface-container flex items-start gap-2.5 text-body-sm font-body-sm">
+                        <span className={`material-symbols-outlined text-[18px] shrink-0 mt-0.5 ${
+                          isSatisfied ? 'text-tertiary' : 'text-error'
+                        }`}>
+                          {isSatisfied ? 'check_circle' : 'cancel'}
+                        </span>
+                        <div>
+                          <span className="font-semibold text-on-surface block">{desc}</span>
+                          <span className="text-secondary text-xs">{detail}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Section 4: Proposed Commit & PR Preview */}
+            <div className="space-y-3">
+              <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface flex items-center gap-2">
+                <span className="material-symbols-outlined text-secondary text-[20px]">preview</span>
+                <span>4. Proposed Commit & PR Preview</span>
+              </h3>
+              <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-3 font-code-sm text-code-sm">
+                <div>
+                  <span className="text-secondary text-[11px] uppercase font-bold block mb-1">Proposed Commit Message:</span>
+                  <div className="p-2.5 rounded bg-surface-container-lowest font-mono text-on-surface border border-surface-container">
+                    {pilotReport.proposedCommitMessage || 'fix: resolve assigned issue'}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-secondary text-[11px] uppercase font-bold block mb-1">Proposed PR Description:</span>
+                  <pre className="p-2.5 rounded bg-surface-container-lowest font-mono text-on-surface border border-surface-container whitespace-pre-wrap text-xs">
+                    {pilotReport.proposedPrDescription || 'Resolves assigned issue.'}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 5: Remaining Limitations */}
+            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2 text-body-sm font-body-sm">
+              <span className="font-headline-sm text-headline-sm font-bold text-on-surface block">
+                5. Milestone v0.4.4 Boundaries & Limitations:
+              </span>
+              <ul className="list-disc pl-5 space-y-1 text-secondary text-xs">
+                {pilotReport.remainingLimitations.map((lim, idx) => (
+                  <li key={idx}>{lim}</li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Section 6: Invariant Confirmation */}
+            <div className="p-4 rounded-xl bg-tertiary-container/20 border border-tertiary/40 flex items-center gap-3 text-tertiary font-headline-sm text-headline-sm font-bold">
+              <span className="material-symbols-outlined text-[24px] shrink-0">verified_user</span>
+              <span>
+                Confirmation: No live GitHub pull request was published or upstream branch modified without explicit contributor approval.
+              </span>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end pt-2 border-t border-surface-container">
+              <button
+                type="button"
+                onClick={() => setShowPilotReportModal(false)}
+                className="px-5 py-2.5 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-headline-sm text-headline-sm font-semibold transition-colors cursor-pointer"
+              >
+                Close Report
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

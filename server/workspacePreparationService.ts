@@ -6,10 +6,14 @@
  * Does NOT generate code, execute plans, commit changes, or open pull requests.
  */
 
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { githubServerClient, classifyGitHubError } from './githubClient';
 import { userAuthStore } from './userAuthStore';
 import { contributionSessionStore } from './contributionSessionStore';
 import { workspaceExecutionEngine } from './workspaceExecutionEngine';
+
+const execFileAsync = promisify(execFile);
 import type {
   ContributionSession,
   ContributorForkInfo,
@@ -141,7 +145,7 @@ export class WorkspacePreparationService {
         defaultBranch,
         userAuthStore.getUserToken() || undefined
       );
-      currentHeadSha = branchInfo.commitSha;
+      currentHeadSha = branchInfo.commitSha || (branchInfo as any).sha;
     } catch (err: any) {
       if (err.classification === 'RATE_LIMIT') {
         contributionSessionStore.updateSession(session.id, {
@@ -159,6 +163,18 @@ export class WorkspacePreparationService {
         throw err;
       }
       currentHeadSha = 'upstream-head-ref';
+    }
+
+    // If currentHeadSha was not obtained from GitHub but customCloneSource is present, retrieve HEAD sha directly
+    if ((!currentHeadSha || currentHeadSha === 'upstream-head-ref') && session.customCloneSource) {
+      try {
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: session.customCloneSource });
+        if (stdout && stdout.trim()) {
+          currentHeadSha = stdout.trim();
+        }
+      } catch {
+        // Ignore fallback failure
+      }
     }
 
     // Compare with approved snapshot SHA if available
@@ -192,7 +208,17 @@ export class WorkspacePreparationService {
       throw error;
     }
 
-    const effectiveApprovedSha = approvedSha || currentHeadSha;
+    let effectiveApprovedSha = approvedSha || currentHeadSha;
+    if ((!effectiveApprovedSha || effectiveApprovedSha === 'upstream-head-ref') && session.customCloneSource) {
+      try {
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: session.customCloneSource });
+        if (stdout && stdout.trim()) {
+          effectiveApprovedSha = stdout.trim();
+        }
+      } catch {
+        // Ignore fallback failure
+      }
+    }
 
     // 5. Contributor Identity & Authorization Boundaries
     const userProfile = userAuthStore.getUserProfile();

@@ -94,6 +94,7 @@ class ContributionSessionStore {
       humanApproval: {
         status: 'pending',
       },
+      currentSubmission: null,
       activityTimeline: initialTimeline,
     };
 

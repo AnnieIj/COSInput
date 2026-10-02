@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useToast } from '../context/ToastContext';
 import { mockCIGuardianWorkflow } from '../data/mock';
 import { CIChecksMatrix } from '../components/common/CIChecksMatrix';
 import { ApprovalActions } from '../components/common/ApprovalActions';
@@ -7,10 +8,12 @@ import { ApprovalActions } from '../components/common/ApprovalActions';
 export const CIGuardianPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [selectedCheck, setSelectedCheck] = useState('typecheck');
   const [isCopiedLog, setIsCopiedLog] = useState(false);
   const [isPushed, setIsPushed] = useState(false);
   const [discarded, setDiscarded] = useState(false);
+  const [retriggering, setRetriggering] = useState(false);
 
   const workflow = mockCIGuardianWorkflow;
 
@@ -71,11 +74,21 @@ export const CIGuardianPage: React.FC = () => {
         <div className="flex items-center gap-2 self-start md:self-center shrink-0">
           <button
             type="button"
-            onClick={() => alert("Re-triggering GitHub Actions CI workflow #91024...")}
+            disabled={retriggering}
+            onClick={() => {
+              setRetriggering(true);
+              toast.info("Re-triggering GitHub Actions CI workflow #91024...");
+              setTimeout(() => {
+                setRetriggering(false);
+                toast.success("Workflow #91024 dispatched successfully.");
+              }, 1200);
+            }}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-surface-container-lowest text-on-surface hover:bg-surface-container font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm transition-all"
           >
-            <span className="material-symbols-outlined text-[16px]">refresh</span>
-            <span>Re-trigger CI on GitHub</span>
+            <span className={`material-symbols-outlined text-[16px] ${retriggering ? 'animate-spin' : ''}`}>
+              refresh
+            </span>
+            <span>{retriggering ? 'Dispatching...' : 'Re-trigger CI on GitHub'}</span>
           </button>
           <a
             href="https://github.com"
@@ -432,17 +445,14 @@ export const CIGuardianPage: React.FC = () => {
           isCompleted={isPushed}
           onApprove={() => {
             setIsPushed(true);
-            setTimeout(() => {
-              alert("Patch pushed to origin/cosinput/381-verification-stake! GitHub Actions workflow #91025 triggered.");
-            }, 300);
+            toast.success("Patch pushed to origin/cosinput/381-verification-stake! GitHub Actions workflow #91025 triggered.");
           }}
           onDiscard={() => {
-            if (confirm("Discard this proposed repair AST patch?")) {
-              setDiscarded(true);
-            }
+            setDiscarded(true);
+            toast.info("Proposed repair AST patch marked as discarded.");
           }}
           onEdit={() => {
-            alert("Opening COSInput inline AST patch editor for src/components/StakeForm.tsx");
+            toast.info("Opening COSInput inline AST patch editor for src/components/StakeForm.tsx");
           }}
         />
       </div>

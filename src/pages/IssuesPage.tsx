@@ -10,6 +10,7 @@ import type {
   SanitizedGitHubError,
   RepositoryAccessStatus,
   COSInputContributionStatus,
+  PilotEligibilityCheck,
 } from '../services/types';
 
 export const IssuesPage: React.FC = () => {
@@ -37,6 +38,100 @@ export const IssuesPage: React.FC = () => {
 
   // Start Contribution Gate Modal
   const [selectedIssueForGate, setSelectedIssueForGate] = useState<GitHubAssignedIssueRef | null>(null);
+
+  // First Real Contributor Pilot Modal State
+  const [selectedIssueForPilot, setSelectedIssueForPilot] = useState<GitHubAssignedIssueRef | null>(null);
+  const [pilotEligibility, setPilotEligibility] = useState<PilotEligibilityCheck | null>(null);
+  const [checkingEligibility, setCheckingEligibility] = useState<boolean>(false);
+  const [startingPilot, setStartingPilot] = useState<boolean>(false);
+  const [pilotError, setPilotError] = useState<string | null>(null);
+
+  const handleOpenPilotModal = async (issue: GitHubAssignedIssueRef) => {
+    setSelectedIssueForPilot(issue);
+    setCheckingEligibility(true);
+    setPilotError(null);
+    setPilotEligibility(null);
+
+    // Immediate historical issue protection: AgesEmpire/StellarSwipe-FrontEnd #657
+    if (
+      issue.repositoryOwner.toLowerCase() === 'agesempire' &&
+      issue.repositoryName.toLowerCase() === 'stellarswipe-frontend' &&
+      issue.number === 657
+    ) {
+      setPilotEligibility({
+        eligible: false,
+        isOpen: false,
+        isAssigned: false,
+        isAccessible: true,
+        isCompleted: true,
+        hasExistingPr: false,
+        isExcludedHistorical: true,
+        reasons: [
+          'Historical issue AgesEmpire/StellarSwipe-FrontEnd #657 is reserved for regression verification only and is strictly excluded from active pilot execution.',
+        ],
+      });
+      setCheckingEligibility(false);
+      return;
+    }
+
+    try {
+      if (isLive) {
+        const res = await githubService.checkPilotEligibility(
+          issue.repositoryOwner,
+          issue.repositoryName,
+          issue.number
+        );
+        if (res.success && res.eligibility) {
+          setPilotEligibility(res.eligibility);
+        }
+      } else {
+        setPilotEligibility({
+          eligible: true,
+          isOpen: true,
+          isAssigned: true,
+          isAccessible: true,
+          isCompleted: false,
+          hasExistingPr: false,
+          isExcludedHistorical: false,
+          reasons: [],
+        });
+      }
+    } catch (err: any) {
+      setPilotError(err.message || 'Failed to verify pilot eligibility.');
+    } finally {
+      setCheckingEligibility(false);
+    }
+  };
+
+  const handleConfirmPilotSelection = async () => {
+    if (!selectedIssueForPilot) return;
+    setStartingPilot(true);
+    setPilotError(null);
+
+    try {
+      const res = await githubService.selectPilotIssue({
+        owner: selectedIssueForPilot.repositoryOwner,
+        repo: selectedIssueForPilot.repositoryName,
+        issueNumber: selectedIssueForPilot.number,
+        issueTitle: selectedIssueForPilot.title,
+        issueUrl: selectedIssueForPilot.htmlUrl,
+        repoAuthorizationStatus: selectedIssueForPilot.repoAuthorizationStatus,
+      });
+
+      if (res.success && res.session?.id) {
+        navigate(`/contributions/${res.session.id}?pilot=true`);
+        return;
+      }
+    } catch (err: any) {
+      setPilotError(err.message || 'Failed to initialize pilot session.');
+      setStartingPilot(false);
+      return;
+    }
+
+    const safeOwner = selectedIssueForPilot.repositoryOwner.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const safeRepo = selectedIssueForPilot.repositoryName.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    navigate(`/contributions/contrib-${safeOwner}-${safeRepo}-${selectedIssueForPilot.number}?pilot=true`);
+  };
 
   // Load assignments (initial fetch or manual sync)
   const loadAssignments = useCallback(async (forceSync = false, targetUser?: string) => {
@@ -477,6 +572,53 @@ export const IssuesPage: React.FC = () => {
         </div>
       )}
 
+      {/* First Real Contributor Pilot (v0.4.4) Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-r from-tertiary-container/20 via-surface-container-low to-primary-container/15 border border-tertiary/30 shadow-sm space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-tertiary text-on-tertiary flex items-center justify-center shrink-0 shadow-sm">
+              <span className="material-symbols-outlined text-[24px]">flight_takeoff</span>
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                  First Real Contributor Pilot (v0.4.4)
+                </h2>
+                <span className="px-2.5 py-0.5 rounded-full bg-tertiary text-on-tertiary font-code-sm text-[10px] font-bold uppercase tracking-wider">
+                  Active Milestone
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full bg-surface-container-high text-on-surface font-code-sm text-[10px] font-semibold border border-surface-container">
+                  Human-Supervised
+                </span>
+              </div>
+              <p className="font-body-sm text-body-sm text-secondary max-w-3xl">
+                Select one fresh, unresolved issue from your synchronized assignments below. COSInput will clone the authentic upstream repository, checkout an isolated branch from the verified base SHA, generate a grounded implementation plan for your approval, run genuine repository test and lint commands, and present the real Git diff for your review.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span className="text-[11px] font-code-sm font-semibold text-secondary flex items-center gap-1">
+              <span className="material-symbols-outlined text-[14px] text-tertiary">verified_user</span>
+              <span>Zero Automated PRs</span>
+            </span>
+            <span className="text-[11px] font-code-sm font-semibold text-secondary flex items-center gap-1">
+              <span className="material-symbols-outlined text-[14px] text-primary">commit</span>
+              <span>Authentic Git Checkout</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="pt-2 border-t border-surface-container/60 flex items-center justify-between text-code-sm font-code-sm text-secondary flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px] text-amber-700">info</span>
+            <span>
+              <strong>Pilot Selection Rule:</strong> Historical issue <code>AgesEmpire/StellarSwipe-FrontEnd #657</code> is strictly excluded. Automatic issue selection is disabled.
+            </span>
+          </div>
+          <span className="font-semibold text-on-surface">Choose an assigned issue below to begin</span>
+        </div>
+      </div>
+
       {/* 3. Metrics Summary Strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="bg-surface-container-lowest p-4 rounded-xl border border-surface-container shadow-sm">
@@ -873,13 +1015,36 @@ export const IssuesPage: React.FC = () => {
                           <span className="material-symbols-outlined text-[18px]">open_in_new</span>
                         </a>
 
+                        {/* Contributor Pilot Button (v0.4.4) */}
+                        {issue.repositoryOwner.toLowerCase() === 'agesempire' &&
+                        issue.repositoryName.toLowerCase() === 'stellarswipe-frontend' &&
+                        issue.number === 657 ? (
+                          <span
+                            className="px-3 py-1.5 rounded-lg bg-surface-container text-secondary text-xs font-semibold flex items-center gap-1 border border-surface-container-high"
+                            title="AgesEmpire/StellarSwipe-FrontEnd #657 is reserved for regression verification only"
+                          >
+                            <span className="material-symbols-outlined text-[15px] text-amber-700">block</span>
+                            <span>Pilot Excluded (#657)</span>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenPilotModal(issue)}
+                            className="px-3.5 py-1.5 rounded-lg bg-tertiary-container hover:bg-tertiary text-on-tertiary font-headline-sm text-headline-sm font-semibold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                            title="Select this issue for First Real Contributor Pilot (v0.4.4)"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">flight_takeoff</span>
+                            <span>Select for Pilot</span>
+                          </button>
+                        )}
+
                         {/* Start Contribution Button */}
                         <button
                           type="button"
                           onClick={() => setSelectedIssueForGate(issue)}
-                          className="px-3.5 py-1.5 rounded-lg bg-primary-container hover:bg-primary text-on-primary font-headline-sm text-headline-sm font-semibold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
+                          className="px-3.5 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-on-surface font-headline-sm text-headline-sm font-medium border border-surface-container shadow-sm transition-all flex items-center gap-1.5 cursor-pointer"
                         >
-                          <span>Start Contribution</span>
+                          <span>Analysis Only</span>
                           <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
                         </button>
                       </div>
@@ -1095,6 +1260,198 @@ export const IssuesPage: React.FC = () => {
               >
                 <span>Start Contribution Analysis</span>
                 <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 11. First Real Contributor Pilot Modal (v0.4.4) */}
+      {selectedIssueForPilot && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface-container-lowest rounded-2xl max-w-xl w-full p-6 border border-surface-container shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-tertiary text-on-tertiary flex items-center justify-center shrink-0 shadow">
+                  <span className="material-symbols-outlined text-[22px]">flight_takeoff</span>
+                </div>
+                <div>
+                  <h3 className="font-headline-sm text-headline-sm font-bold text-on-surface">
+                    First Real Contributor Pilot Selection
+                  </h3>
+                  <span className="font-code-sm text-code-sm text-secondary font-mono">
+                    {selectedIssueForPilot.repository} #{selectedIssueForPilot.number}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedIssueForPilot(null);
+                  setPilotEligibility(null);
+                  setPilotError(null);
+                }}
+                className="p-1.5 rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </div>
+
+            {/* Selected Issue Summary */}
+            <div className="p-4 rounded-xl bg-surface-container-low border border-surface-container space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-secondary text-[11px] font-bold uppercase tracking-wider block">
+                  Selected Pilot Issue
+                </span>
+                <a
+                  href={selectedIssueForPilot.htmlUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-code-sm text-[11px] text-primary hover:underline flex items-center gap-1"
+                >
+                  <span>View on GitHub</span>
+                  <span className="material-symbols-outlined text-[13px]">open_in_new</span>
+                </a>
+              </div>
+              <h4 className="font-headline-sm text-headline-sm font-semibold text-on-surface">
+                {selectedIssueForPilot.title}
+              </h4>
+            </div>
+
+            {/* 5-Point Strict Eligibility Check */}
+            <div className="p-4 rounded-xl border border-surface-container bg-surface-container-lowest space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-secondary text-[11px] font-bold uppercase tracking-wider">
+                  Pilot Eligibility Verification
+                </span>
+                {checkingEligibility ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-surface-container text-secondary font-code-sm text-[11px] font-semibold flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                    <span>Checking GitHub...</span>
+                  </span>
+                ) : pilotEligibility?.eligible ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-tertiary-container/20 text-tertiary font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-tertiary/30">
+                    <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                    <span>Eligible for Pilot</span>
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full bg-error-container/20 text-error font-code-sm text-[11px] font-semibold flex items-center gap-1 border border-error/30">
+                    <span className="material-symbols-outlined text-[14px]">cancel</span>
+                    <span>Ineligible</span>
+                  </span>
+                )}
+              </div>
+
+              {/* Individual Invariant Checks */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-code-sm text-code-sm">
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">1. Issue Open:</span>
+                  <span className={`font-semibold ${pilotEligibility?.isOpen ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : pilotEligibility?.isOpen ? '✓ Open' : '✗ Closed'}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">2. Contributor Assigned:</span>
+                  <span className={`font-semibold ${pilotEligibility?.isAssigned ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : pilotEligibility?.isAssigned ? '✓ Assigned' : '✗ Not Assigned'}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">3. Repo Accessible:</span>
+                  <span className={`font-semibold ${pilotEligibility?.isAccessible ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : pilotEligibility?.isAccessible ? '✓ Accessible' : '✗ Inaccessible'}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">4. Not Completed:</span>
+                  <span className={`font-semibold ${!pilotEligibility?.isCompleted ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : !pilotEligibility?.isCompleted ? '✓ Fresh' : '✗ Completed'}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">5. No Existing PR:</span>
+                  <span className={`font-semibold ${!pilotEligibility?.hasExistingPr ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : !pilotEligibility?.hasExistingPr ? '✓ None' : '✗ PR Exists'}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                  <span className="text-secondary">6. Exclusion (#657):</span>
+                  <span className={`font-semibold ${!pilotEligibility?.isExcludedHistorical ? 'text-tertiary' : 'text-error'}`}>
+                    {checkingEligibility ? '...' : !pilotEligibility?.isExcludedHistorical ? '✓ Passed' : '✗ Excluded'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Eligibility Failure Reasons */}
+              {pilotEligibility && !pilotEligibility.eligible && pilotEligibility.reasons.length > 0 && (
+                <div className="p-3 rounded-lg bg-error-container/20 border border-error/30 text-error text-body-sm font-body-sm space-y-1">
+                  <div className="font-semibold flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-[16px]">warning</span>
+                    <span>Issue Eligibility Errors:</span>
+                  </div>
+                  <ul className="list-disc pl-5 space-y-0.5">
+                    {pilotEligibility.reasons.map((r, i) => (
+                      <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {pilotError && (
+                <div className="p-3 rounded-lg bg-error-container/20 border border-error/30 text-error text-body-sm font-body-sm flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[16px]">error</span>
+                  <span>{pilotError}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Human Supervision Invariants */}
+            <div className="p-3.5 rounded-xl bg-surface-container-low border border-surface-container space-y-2 text-body-sm font-body-sm text-secondary">
+              <span className="font-semibold text-on-surface block text-headline-sm">
+                Pilot Governance & Safety Invariants:
+              </span>
+              <ul className="space-y-1.5 text-[13px]">
+                <li className="flex items-start gap-1.5">
+                  <span className="material-symbols-outlined text-primary text-[16px] shrink-0 mt-0.5">check</span>
+                  <span><strong>Authentic Execution:</strong> Operates on genuine upstream clone with verified base commit SHA and isolated branch.</span>
+                </li>
+                <li className="flex items-start gap-1.5">
+                  <span className="material-symbols-outlined text-primary text-[16px] shrink-0 mt-0.5">check</span>
+                  <span><strong>Grounded Implementation:</strong> Plan formulated from real repo source; requires explicit approval before changes.</span>
+                </li>
+                <li className="flex items-start gap-1.5">
+                  <span className="material-symbols-outlined text-primary text-[16px] shrink-0 mt-0.5">check</span>
+                  <span><strong>Genuine Verification:</strong> Executes real repository test/lint commands, recording outcomes (Passed, Failed, Blocked, Not run).</span>
+                </li>
+                <li className="flex items-start gap-1.5">
+                  <span className="material-symbols-outlined text-tertiary text-[16px] shrink-0 mt-0.5">verified_user</span>
+                  <span><strong>Remote Write Safety:</strong> Stops at REVIEW_READY. Zero automatic commits or PR creation.</span>
+                </li>
+              </ul>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedIssueForPilot(null);
+                  setPilotEligibility(null);
+                  setPilotError(null);
+                }}
+                className="px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md font-semibold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                disabled={checkingEligibility || startingPilot || !pilotEligibility?.eligible}
+                onClick={handleConfirmPilotSelection}
+                className="px-5 py-2.5 rounded-lg bg-tertiary hover:opacity-90 text-on-tertiary font-headline-sm text-headline-sm font-semibold shadow-md transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[18px]">flight_takeoff</span>
+                <span>{startingPilot ? 'Starting Pilot Session...' : 'Confirm Selection & Start Pilot'}</span>
               </button>
             </div>
           </div>

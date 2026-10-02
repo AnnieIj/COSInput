@@ -521,6 +521,9 @@ export interface ContributionSession {
   submissionHistory?: SubmissionRecord[];
   customCloneSource?: string;
   requireAuthenticCheckout?: boolean;
+  isPilotRun?: boolean;
+  pilotStatus?: PilotStatus;
+  pilotReport?: PilotFinalReport | null;
 }
 
 export type ExecutionStatus =
@@ -575,6 +578,8 @@ export interface ModifiedFileResult {
   modifiedLength: number;
 }
 
+export type VerificationOutcome = 'PASSED' | 'FAILED' | 'BLOCKED' | 'NOT_RUN';
+
 export interface VerificationResultItem {
   id: string;
   type: 'diff_review' | 'test' | 'typecheck' | 'lint' | 'build';
@@ -582,15 +587,20 @@ export interface VerificationResultItem {
   exitCode: number;
   outputSummary: string;
   passed: boolean;
+  outcome?: VerificationOutcome;
   timestamp: string;
   durationMs: number;
+  blockReason?: string;
 }
 
 export interface AcceptanceCriterionEvidence {
   criterionId: string;
-  description: string;
-  verified: boolean;
-  evidence: string;
+  description?: string;
+  criterionDescription?: string;
+  verified?: boolean;
+  satisfied?: boolean;
+  evidence?: string;
+  verificationDetail?: string;
   commandUsed?: string;
 }
 
@@ -748,4 +758,211 @@ export interface ImplementationRunState {
   finalReport?: ImplementationFinalReport | null;
   errorMessage?: string;
 }
+
+export type PilotStatus =
+  | 'ISSUE_SELECTION_REQUIRED'
+  | 'ISSUE_VERIFIED'
+  | 'PLANNING'
+  | 'PLAN_APPROVAL_REQUIRED'
+  | 'PLAN_APPROVED'
+  | 'EXECUTING'
+  | 'VERIFYING'
+  | 'REVIEW_READY'
+  | 'REJECTED'
+  | 'SUBMISSION_APPROVED'
+  | 'COMPLETED';
+
+export interface PilotEligibilityCheck {
+  eligible: boolean;
+  isOpen: boolean;
+  isAssigned: boolean;
+  isAccessible: boolean;
+  isCompleted: boolean;
+  hasExistingPr: boolean;
+  isExcludedHistorical: boolean;
+  existingPrUrl?: string;
+  existingPrNumber?: number;
+  reasons: string[];
+}
+
+export interface PilotFinalReport {
+  sessionId: string;
+  selectedIssue: {
+    number: number;
+    title: string;
+    repository: string;
+    url: string;
+  };
+  changedFiles: string[];
+  gitDiff?: string;
+  actualTestResults: VerificationResultItem[];
+  acceptanceCriteriaEvidence: AcceptanceCriterionEvidence[];
+  proposedCommitMessage?: string;
+  proposedPrDescription?: string;
+  outstandingRisks?: string[];
+  pilotWorkflowStatus: PilotStatus | string;
+  remainingLimitations: string[];
+  noLiveModificationConfirmed: boolean;
+  reviewDecision?: 'APPROVED' | 'REVISED' | 'REJECTED' | 'PENDING';
+  generatedAt: string;
+}
+
+/**
+ * ============================================================================
+ * COSInput Foundation v0.5.1 — Read-Only CI Guardian Types
+ * ============================================================================
+ */
+export type NormalizedCheckStatus =
+  | 'QUEUED'
+  | 'IN_PROGRESS'
+  | 'PASSED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'TIMED_OUT'
+  | 'SKIPPED'
+  | 'ACTION_REQUIRED'
+  | 'UNKNOWN';
+
+export type FailureClassificationCategory =
+  | 'TEST_FAILURE'
+  | 'TYPECHECK_FAILURE'
+  | 'LINT_FAILURE'
+  | 'BUILD_FAILURE'
+  | 'DEPENDENCY_FAILURE'
+  | 'CONFIGURATION_FAILURE'
+  | 'ENVIRONMENT_FAILURE'
+  | 'TIMEOUT'
+  | 'PERMISSION_FAILURE'
+  | 'EXTERNAL_SERVICE_FAILURE'
+  | 'UNKNOWN_FAILURE';
+
+export type FactDistinction =
+  | 'VERIFIED_FACT'
+  | 'EVIDENCE_BASED_INFERENCE'
+  | 'UNKNOWN';
+
+export type GuardianCockpitState =
+  | 'CI_PENDING'
+  | 'CI_PASSING'
+  | 'CI_FAILURE_DETECTED'
+  | 'ANALYZING_FAILURE'
+  | 'DIAGNOSIS_READY'
+  | 'EVIDENCE_UNAVAILABLE'
+  | 'CI_DATA_UNAVAILABLE';
+
+export interface CheckAnnotation {
+  path: string;
+  startLine?: number;
+  endLine?: number;
+  annotationLevel: 'failure' | 'warning' | 'notice' | string;
+  title?: string;
+  message: string;
+  rawDetails?: string;
+}
+
+export interface CheckItem {
+  id: string;
+  name: string;
+  source: 'check_run' | 'commit_status';
+  providerStatus: string;
+  providerConclusion?: string | null;
+  normalizedStatus: NormalizedCheckStatus;
+  startedAt?: string;
+  completedAt?: string;
+  htmlUrl?: string;
+  detailsUrl?: string;
+  summary?: string;
+  text?: string;
+  annotations?: CheckAnnotation[];
+}
+
+export interface FailureClassification {
+  category: FailureClassificationCategory;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  supportingEvidence: string[];
+  sourceCheckName: string;
+  sourceCheckId: string;
+  relevantFiles: string[];
+  logExcerpts: string[];
+  annotations: CheckAnnotation[];
+}
+
+export interface DiagnosisEvidenceItem {
+  type: FactDistinction;
+  statement: string;
+  source: string;
+}
+
+export interface CheckDiagnosis {
+  checkName: string;
+  checkId: string;
+  failedCommandOrStep?: string;
+  githubReportedSummary: string;
+  likelyCategory: FailureClassificationCategory;
+  relevantFiles: string[];
+  additionalEvidenceRequired?: string;
+  relatedToPrDiff: boolean;
+  diffRelevanceReasoning: string;
+  distinctions: DiagnosisEvidenceItem[];
+}
+
+export interface ProposedRepairProposal {
+  id: string;
+  failedCheckName: string;
+  rootCauseHypothesis: string;
+  evidenceSupportingHypothesis: string[];
+  candidateFilesRequiringInspection: string[];
+  proposedModification: string;
+  verificationCommandToRerun: string;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  confidenceLevel: 'HIGH' | 'MEDIUM' | 'LOW';
+  requiresFurtherInspection: boolean;
+}
+
+export interface GuardianPullRequestSummary {
+  upstreamRepository: string;
+  upstreamOwner: string;
+  upstreamRepo: string;
+  prNumber: number;
+  prUrl: string;
+  prTitle: string;
+  prState: string;
+  headRepository: string;
+  headOwner: string;
+  headRepo: string;
+  headBranch: string;
+  headCommitSha: string;
+  baseBranch: string;
+  author: string;
+  mergeable?: boolean | null;
+  mergeableState?: string | null;
+  prChangedFiles: string[];
+}
+
+export interface GuardianObservation {
+  id: string;
+  observedKey: string;
+  pullRequest: GuardianPullRequestSummary;
+  headCommitSha: string;
+  state: GuardianCockpitState;
+  summary: {
+    totalChecks: number;
+    passedCount: number;
+    failedCount: number;
+    inProgressCount: number;
+    queuedCount: number;
+    otherCount: number;
+    conclusion: 'PASSED' | 'FAILED' | 'PENDING' | 'UNKNOWN' | 'NO_CHECKS';
+  };
+  checks: CheckItem[];
+  classifications: FailureClassification[];
+  diagnoses: CheckDiagnosis[];
+  repairProposals: ProposedRepairProposal[];
+  evidenceStatus: 'AVAILABLE' | 'EVIDENCE_UNAVAILABLE' | 'NOT_APPLICABLE';
+  evidenceUnavailableReason?: string;
+  observedAt: string;
+  lastRefreshedAt: string;
+  isSuperseded?: boolean;
+}
+
 

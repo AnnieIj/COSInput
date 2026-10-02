@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useMode } from '../context/ModeContext';
+import { useToast } from '../context/ToastContext';
 import { githubService } from '../services/github.service';
 
 export const SettingsPage: React.FC = () => {
@@ -15,6 +16,7 @@ export const SettingsPage: React.FC = () => {
     connectUserByUsername,
     disconnectUser,
   } = useMode();
+  const { toast } = useToast();
 
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [webhookEvents, setWebhookEvents] = useState<any[]>([]);
@@ -52,7 +54,7 @@ export const SettingsPage: React.FC = () => {
     if (installUrl) {
       window.open(installUrl, '_blank', 'noopener,noreferrer');
     } else {
-      alert(
+      toast.warning(
         'GITHUB_APP_SLUG is not configured on the server. Please define GITHUB_APP_SLUG in your environment variables.'
       );
     }

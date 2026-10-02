@@ -1050,6 +1050,342 @@ export class GitHubServerClient {
   }
 
   /**
+   * Retrieves single pull request details, including mergeable state, author, head, and base.
+   */
+  async getPullRequest(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    userToken?: string
+  ): Promise<{
+    id: number;
+    number: number;
+    title: string;
+    body: string;
+    state: string;
+    htmlUrl: string;
+    author: string;
+    head: {
+      ref: string;
+      sha: string;
+      label: string;
+      repo?: { owner: string; name: string; fullName: string };
+    };
+    base: {
+      ref: string;
+      sha: string;
+      label: string;
+      repo?: { owner: string; name: string; fullName: string };
+    };
+    mergeable?: boolean | null;
+    mergeableState?: string | null;
+    createdAt: string;
+    updatedAt: string;
+    draft: boolean;
+  }> {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.5.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const pr = parsed.json || {};
+    return {
+      id: pr.id,
+      number: pr.number,
+      title: pr.title,
+      body: pr.body || '',
+      state: pr.state,
+      htmlUrl: pr.html_url,
+      author: pr.user?.login || '',
+      head: {
+        ref: pr.head?.ref || '',
+        sha: pr.head?.sha || '',
+        label: pr.head?.label || '',
+        repo: pr.head?.repo
+          ? {
+              owner: pr.head.repo.owner?.login || '',
+              name: pr.head.repo.name || '',
+              fullName: pr.head.repo.full_name || '',
+            }
+          : undefined,
+      },
+      base: {
+        ref: pr.base?.ref || '',
+        sha: pr.base?.sha || '',
+        label: pr.base?.label || '',
+        repo: pr.base?.repo
+          ? {
+              owner: pr.base.repo.owner?.login || '',
+              name: pr.base.repo.name || '',
+              fullName: pr.base.repo.full_name || '',
+            }
+          : undefined,
+      },
+      mergeable: pr.mergeable ?? null,
+      mergeableState: pr.mergeable_state ?? null,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      draft: Boolean(pr.draft),
+    };
+  }
+
+  /**
+   * Retrieves files modified by a pull request.
+   */
+  async getPullRequestFiles(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    userToken?: string
+  ): Promise<
+    Array<{
+      filename: string;
+      status: string;
+      additions: number;
+      deletions: number;
+      changes: number;
+      rawUrl?: string;
+      patch?: string;
+    }>
+  > {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.5.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/files?per_page=100`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any[]>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
+    return data.map((f: any) => ({
+      filename: f.filename,
+      status: f.status,
+      additions: f.additions || 0,
+      deletions: f.deletions || 0,
+      changes: f.changes || 0,
+      rawUrl: f.raw_url,
+      patch: f.patch,
+    }));
+  }
+
+  /**
+   * Retrieves GitHub check-runs for a commit SHA or reference.
+   */
+  async getCommitCheckRuns(
+    owner: string,
+    repo: string,
+    ref: string,
+    userToken?: string
+  ): Promise<{
+    totalCount: number;
+    checkRuns: Array<{
+      id: number;
+      name: string;
+      headSha: string;
+      status: string;
+      conclusion: string | null;
+      htmlUrl: string;
+      detailsUrl?: string;
+      startedAt?: string;
+      completedAt?: string;
+      output: {
+        title?: string;
+        summary?: string;
+        text?: string;
+        annotationsCount?: number;
+      };
+      checkSuite?: { id: number };
+    }>;
+  }> {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.5.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}/check-runs?per_page=100`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const data = parsed.json || {};
+    const checkRuns = Array.isArray(data.check_runs) ? data.check_runs : [];
+    return {
+      totalCount: data.total_count ?? checkRuns.length,
+      checkRuns: checkRuns.map((cr: any) => ({
+        id: cr.id,
+        name: cr.name,
+        headSha: cr.head_sha || ref,
+        status: cr.status || 'unknown',
+        conclusion: cr.conclusion ?? null,
+        htmlUrl: cr.html_url || '',
+        detailsUrl: cr.details_url,
+        startedAt: cr.started_at,
+        completedAt: cr.completed_at,
+        output: {
+          title: cr.output?.title,
+          summary: cr.output?.summary,
+          text: cr.output?.text,
+          annotationsCount: cr.output?.annotations_count,
+        },
+        checkSuite: cr.check_suite ? { id: cr.check_suite.id } : undefined,
+      })),
+    };
+  }
+
+  /**
+   * Retrieves GitHub commit combined status (legacy commit status checks).
+   */
+  async getCommitCombinedStatus(
+    owner: string,
+    repo: string,
+    ref: string,
+    userToken?: string
+  ): Promise<{
+    state: string;
+    sha: string;
+    totalCount: number;
+    statuses: Array<{
+      id: number;
+      state: string;
+      description?: string;
+      targetUrl?: string;
+      context: string;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  }> {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.5.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}/status`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any>(response);
+    if (!response.ok) {
+      const errorText = (parsed.json && ((parsed.json as any).message || (parsed.json as any).error)) || parsed.text;
+      throw classifyGitHubError(response.status, String(errorText), response.headers, 'other');
+    }
+
+    const data = parsed.json || {};
+    const statuses = Array.isArray(data.statuses) ? data.statuses : [];
+    return {
+      state: data.state || 'unknown',
+      sha: data.sha || ref,
+      totalCount: data.total_count ?? statuses.length,
+      statuses: statuses.map((st: any) => ({
+        id: st.id,
+        state: st.state,
+        description: st.description,
+        targetUrl: st.target_url,
+        context: st.context,
+        createdAt: st.created_at,
+        updatedAt: st.updated_at,
+      })),
+    };
+  }
+
+  /**
+   * Retrieves annotations for a specific check-run (compiler errors, lint failures, test assertion details).
+   */
+  async getCheckRunAnnotations(
+    owner: string,
+    repo: string,
+    checkRunId: number,
+    userToken?: string
+  ): Promise<
+    Array<{
+      path: string;
+      startLine?: number;
+      endLine?: number;
+      annotationLevel: string;
+      message: string;
+      title?: string;
+      rawDetails?: string;
+    }>
+  > {
+    const token = await this.getEffectiveToken(undefined, userToken);
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'COSInput-Server/0.5.1',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=100`,
+      { headers }
+    );
+
+    const parsed = await safeParseResponse<any[]>(response);
+    if (!response.ok) {
+      // Annotations are best-effort; don't hard fail if 404 or 403
+      return [];
+    }
+
+    const data = Array.isArray(parsed.json) ? parsed.json : [];
+    return data.map((ann: any) => ({
+      path: ann.path || '',
+      startLine: ann.start_line,
+      endLine: ann.end_line,
+      annotationLevel: ann.annotation_level || 'failure',
+      message: ann.message || '',
+      title: ann.title,
+      rawDetails: ann.raw_details,
+    }));
+  }
+
+  /**
    * Creates a pull request targeting the canonical upstream repository.
    * Requires contributor write authorization.
    * Strictly verifies that target repository matches canonical upstream.

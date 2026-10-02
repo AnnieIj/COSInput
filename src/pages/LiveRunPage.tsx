@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useToast } from '../context/ToastContext';
 import { mockRun8f92a10c } from '../data/mock';
 import { RunStageItem } from '../components/common/RunStageItem';
 import { ReviewComments } from '../components/common/ReviewComments';
@@ -7,6 +8,7 @@ import { ReviewComments } from '../components/common/ReviewComments';
 export const LiveRunPage: React.FC = () => {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<'reviews' | 'changes' | 'tests' | 'ci' | 'acceptance' | 'ledger'>('reviews');
 
   const run = mockRun8f92a10c;
@@ -104,7 +106,10 @@ export const LiveRunPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => alert("Run trace URL copied.")}
+              onClick={() => {
+                navigator.clipboard?.writeText(window.location.href);
+                toast.success("Run trace URL copied to clipboard.");
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-container-lowest hover:bg-surface-container text-on-surface font-label-md text-label-md rounded-lg border border-surface-container shadow-sm transition-colors"
             >
               <span className="material-symbols-outlined text-[16px] text-outline">share</span>
@@ -112,7 +117,7 @@ export const LiveRunPage: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => alert("Re-running verification check suite...")}
+              onClick={() => toast.info("Re-running verification check suite...")}
               className="flex items-center gap-1.5 px-3.5 py-1.5 bg-primary text-on-primary font-label-md text-label-md rounded-lg shadow-sm hover:opacity-95 transition-opacity font-semibold"
             >
               <span className="material-symbols-outlined text-[16px]">refresh</span>
@@ -318,7 +323,7 @@ export const LiveRunPage: React.FC = () => {
                   comment={run.reviewData.comment}
                   proposedResolution={run.reviewData.proposedResolution}
                   onApplyPatch={() => {
-                    alert("Patch applied to branch cosinput/381-verification-stake!");
+                    toast.success("Patch applied to branch cosinput/381-verification-stake!");
                   }}
                   onDraftReply={() => {
                     navigate(`/contributions/${run.issueNumber}/reviews`);

@@ -16,6 +16,8 @@ import type {
   GitHubPRRef,
   GitHubConnectionState,
   SanitizedGitHubError,
+  GuardianPullRequestSummary,
+  GuardianObservation,
 } from './types';
 
 export interface IGitHubService {
@@ -51,6 +53,8 @@ export interface IGitHubService {
   getRepositoryTree(owner: string, repo: string, treeSha: string, recursive?: boolean): Promise<any>;
 
   // v0.3 Contribution Session & Intelligence methods
+  listContributions(): Promise<{ success: boolean; sessions: any[]; totalCount: number }>;
+  listPullRequests(options?: { owner?: string; repo?: string; state?: 'open' | 'closed' | 'all' }): Promise<any[]>;
   createContributionSession(params: {
     owner: string;
     repo: string;
@@ -89,6 +93,28 @@ export interface IGitHubService {
   ): Promise<{ success: boolean; session: any }>;
   resetSubmission(id: string): Promise<{ success: boolean; session: any }>;
   getWorkspaceExecutionStatus(id: string): Promise<{ success: boolean; status: any }>;
+
+  // v0.4.4 First Real Contributor Pilot methods
+  checkPilotEligibility(owner: string, repo: string, issueNumber: number): Promise<{ success: boolean; eligibility: any }>;
+  selectPilotIssue(params: {
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    issueTitle?: string;
+    issueUrl?: string;
+    repoAuthorizationStatus?: string;
+  }): Promise<{ success: boolean; session: any }>;
+  generatePilotPlan(sessionId: string): Promise<{ success: boolean; session: any }>;
+  approvePilotPlan(sessionId: string): Promise<{ success: boolean; session: any }>;
+  executePilotRun(sessionId: string): Promise<{ success: boolean; session: any }>;
+  reviewPilot(sessionId: string, decision: 'APPROVE' | 'REVISE' | 'REJECT', feedback?: string): Promise<{ success: boolean; session: any }>;
+  getPilotReport(sessionId: string, decision?: string): Promise<{ success: boolean; report: any }>;
+
+  // v0.5.1 Read-Only CI Guardian methods
+  discoverGuardianPullRequests(contributor?: string): Promise<{ success: boolean; pulls: GuardianPullRequestSummary[]; totalCount: number }>;
+  inspectGuardianCi(owner: string, repo: string, pullNumber: number, refresh?: boolean): Promise<{ success: boolean; observation: GuardianObservation }>;
+  refreshGuardianCi(owner: string, repo: string, pullNumber: number): Promise<{ success: boolean; observation: GuardianObservation }>;
+  getGuardianObservations(): Promise<{ success: boolean; observations: GuardianObservation[]; totalCount: number }>;
 
   // Reserved write methods (Strictly disabled in v0.2/v0.3 production UI)
   createBranch(owner: string, repo: string, branchName: string, baseSha: string): Promise<{ ref: string; sha: string }>;
@@ -474,6 +500,108 @@ export class RealGitHubService implements IGitHubService {
   async getWorkspaceExecutionStatus(id: string): Promise<{ success: boolean; status: any }> {
     return this.fetchApi<{ success: boolean; status: any }>(
       `/api/github/contributions/${encodeURIComponent(id)}/submission/workspace-status`
+    );
+  }
+
+  async listContributions(): Promise<{ success: boolean; sessions: any[]; totalCount: number }> {
+    return this.fetchApi<{ success: boolean; sessions: any[]; totalCount: number }>(
+      '/api/github/contributions'
+    );
+  }
+
+  async listPullRequests(options?: { owner?: string; repo?: string; state?: 'open' | 'closed' | 'all' }): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (options?.owner) params.set('owner', options.owner);
+    if (options?.repo) params.set('repo', options.repo);
+    if (options?.state) params.set('state', options.state);
+    const data = await this.fetchApi<{ pulls?: any[]; error?: any }>(`/api/github/pulls?${params.toString()}`);
+    return data.pulls || [];
+  }
+
+  // v0.4.4 First Real Contributor Pilot methods
+  async checkPilotEligibility(owner: string, repo: string, issueNumber: number): Promise<{ success: boolean; eligibility: any }> {
+    const params = new URLSearchParams({ owner, repo, issueNumber: String(issueNumber) });
+    return this.fetchApi<{ success: boolean; eligibility: any }>(`/api/github/pilot/eligibility?${params.toString()}`);
+  }
+
+  async selectPilotIssue(params: {
+    owner: string;
+    repo: string;
+    issueNumber: number;
+    issueTitle?: string;
+    issueUrl?: string;
+    repoAuthorizationStatus?: string;
+  }): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>('/api/github/pilot/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+  }
+
+  async generatePilotPlan(sessionId: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/pilot/${encodeURIComponent(sessionId)}/plan`, {
+      method: 'POST',
+    });
+  }
+
+  async approvePilotPlan(sessionId: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/pilot/${encodeURIComponent(sessionId)}/approve-plan`, {
+      method: 'POST',
+    });
+  }
+
+  async executePilotRun(sessionId: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/pilot/${encodeURIComponent(sessionId)}/execute`, {
+      method: 'POST',
+    });
+  }
+
+  async reviewPilot(sessionId: string, decision: 'APPROVE' | 'REVISE' | 'REJECT', feedback?: string): Promise<{ success: boolean; session: any }> {
+    return this.fetchApi<{ success: boolean; session: any }>(`/api/github/pilot/${encodeURIComponent(sessionId)}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, feedback }),
+    });
+  }
+
+  async getPilotReport(sessionId: string, decision?: string): Promise<{ success: boolean; report: any }> {
+    const query = decision ? `?decision=${encodeURIComponent(decision)}` : '';
+    return this.fetchApi<{ success: boolean; report: any }>(`/api/github/pilot/${encodeURIComponent(sessionId)}/report${query}`);
+  }
+
+  // v0.5.1 Read-Only CI Guardian methods
+  async discoverGuardianPullRequests(contributor?: string): Promise<{ success: boolean; pulls: GuardianPullRequestSummary[]; totalCount: number }> {
+    const params = new URLSearchParams();
+    if (contributor) params.set('contributor', contributor);
+    return this.fetchApi<{ success: boolean; pulls: GuardianPullRequestSummary[]; totalCount: number }>(
+      `/api/github/guardian/pulls?${params.toString()}`
+    );
+  }
+
+  async inspectGuardianCi(owner: string, repo: string, pullNumber: number, refresh?: boolean): Promise<{ success: boolean; observation: GuardianObservation }> {
+    const params = new URLSearchParams({
+      owner,
+      repo,
+      pullNumber: String(pullNumber),
+    });
+    if (refresh) params.set('refresh', 'true');
+    return this.fetchApi<{ success: boolean; observation: GuardianObservation }>(
+      `/api/github/guardian/inspect?${params.toString()}`
+    );
+  }
+
+  async refreshGuardianCi(owner: string, repo: string, pullNumber: number): Promise<{ success: boolean; observation: GuardianObservation }> {
+    return this.fetchApi<{ success: boolean; observation: GuardianObservation }>('/api/github/guardian/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ owner, repo, pullNumber }),
+    });
+  }
+
+  async getGuardianObservations(): Promise<{ success: boolean; observations: GuardianObservation[]; totalCount: number }> {
+    return this.fetchApi<{ success: boolean; observations: GuardianObservation[]; totalCount: number }>(
+      '/api/github/guardian/observations'
     );
   }
 
